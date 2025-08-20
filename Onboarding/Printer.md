@@ -11,4 +11,3 @@
 ### Network Configuration
 
 - **IP Address**: `192.168.128.48`
-
