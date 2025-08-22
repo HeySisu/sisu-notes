@@ -4,25 +4,27 @@
 
 **Description:** Query and explore GitHub repositories using the GitHub CLI with comprehensive knowledge of your setup and common operations.
 
-**Default Account:** All commands default to your **Hebbia work account** (`sisuxi`) unless explicitly specified otherwise.
+**Default Account:** All commands use your **Hebbia work account** (`sisuxi`) exclusively.
 
 ## Account Setup
 
-**Work GitHub (DEFAULT):** `sisuxi` (github_hebbia)
+**Hebbia Work Account:** `sisuxi` (github_hebbia)
 - SSH Host: `github_hebbia`
 - Identity: `~/.ssh/id_ed25519_hebbia`
 - Organization: Hebbia
 - Main Repository: `hebbia/mono`
-- **Current CLI auth:** ✓ Active account
-
-**Personal GitHub:** `xisisu` (github_personal)
-- SSH Host: `github_personal`
-- Identity: `~/.ssh/id_ed25519_personal`
-- Usage: For personal projects only
+- **Authentication:** Automatically confirmed before operations
 
 ## Quick Usage
 
-> **Note:** All commands below use your Hebbia work account by default. Repository defaults to `hebbia/mono`.
+> **Note:** All commands automatically ensure you're using the Hebbia work account (`sisuxi`) and confirm authentication before execution. Repository defaults to `hebbia/mono`.
+
+### Account Verification
+```bash
+# Automatically switch to Hebbia account and confirm username
+gh auth switch --hostname github.com --user sisuxi
+gh auth status --hostname github.com | grep "Logged in to github.com as sisuxi"
+```
 
 ### My Recent Activity
 ```bash
@@ -147,26 +149,20 @@ gh api repos/hebbia/mono/contributors --jq '.[].login'
 gh release list --repo hebbia/mono --limit 10
 ```
 
-## Account Switching
 
-> **Default:** You're already using your Hebbia work account. Only switch if you need to work with personal repositories.
 
-### Switch to Personal Account (when needed)
+## Account Management
+
+**Automatic Hebbia Account Setup:**
 ```bash
-# Switch to personal account for personal projects
-gh auth switch --hostname github.com --user xisisu
-
-# Set git remote for personal repos
-git remote set-url origin git@github_personal:xisisu/repo-name.git
-```
-
-### Switch Back to Work Account (Hebbia)
-```bash
-# Switch back to work account (default)
+# Ensure Hebbia account is active (run automatically before operations)
 gh auth switch --hostname github.com --user sisuxi
 
-# Set git remote back for work repos
-git remote set-url origin git@github_hebbia:hebbia/mono.git
+# Verify authentication status
+gh auth status --hostname github.com
+
+# Set default repository
+gh repo set-default hebbia/mono
 ```
 
 ## Date Helpers
@@ -187,6 +183,8 @@ gh search prs --author=sisuxi --created=">=$WEEK_AGO"
 MONTH_AGO=$(date -v-30d +%Y-%m-%d)
 gh search prs --author=sisuxi --created=">=$MONTH_AGO"
 ```
+
+
 
 ## Output Formatting
 
@@ -214,23 +212,35 @@ gh pr list --repo hebbia/mono --json number,title,author,createdAt --template '{
 ## Authentication & Setup
 
 **Current status:**
-- **Authenticated as:** `sisuxi` (Hebbia work account - DEFAULT)
-- **SSH keys configured** for both accounts
+- **Authenticated as:** `sisuxi` (Hebbia work account - ONLY)
+- **SSH keys configured** for Hebbia account
 - **Default repo:** `hebbia/mono`
 - **Git protocol:** SSH
 
 **Key Commands:**
 - `gh auth status` - Check current authentication
-- `gh auth switch` - Switch between accounts
-- `gh auth login` - Add new account authentication
+- `gh auth switch --hostname github.com --user sisuxi` - Ensure Hebbia account
 - `gh repo set-default hebbia/mono` - Set default repository
 
 ## Notes
 
-- **All commands default to your Hebbia work account (`sisuxi`) and `hebbia/mono` repository**
+- **All commands use your Hebbia work account (`sisuxi`) and `hebbia/mono` repository exclusively**
+- **Automatic account verification** ensures you're always on the correct account
 - Date ranges use ISO format (YYYY-MM-DD)
 - Use `--json` flag for machine-readable output
 - Use `--template` for custom formatting
 - Search API has rate limits (5000 requests/hour)
 - PR/Issue numbers are unique per repository
-- **Only switch to personal account when working on personal projects**
+
+### Important: Account Management
+
+**GitHub CLI Configuration:**
+- GitHub CLI authentication automatically uses the Hebbia account (`sisuxi`)
+- SSH host configuration uses `github_hebbia` for all operations
+- All operations are scoped to Hebbia organization and repositories
+
+**Best Practices:**
+1. **Single account workflow:** All operations use Hebbia account exclusively
+2. **Automatic verification:** Account switching and verification happens automatically
+3. **Repository access:** All commands default to `hebbia/mono` repository
+4. **Authentication check:** Username `sisuxi` is confirmed before operations
