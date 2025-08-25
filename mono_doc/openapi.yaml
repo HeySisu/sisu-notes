@@ -1,0 +1,1580 @@
+openapi: 3.1.1
+info:
+  title: Hebbia Platform API
+  description: |
+    Comprehensive API for the Hebbia AI research and document analysis platform.
+
+    This unified specification covers all microservices in the platform:
+    - **Brain Service**: Core platform management (users, organizations, tenants)
+    - **Document Manager**: Document storage, search, and metadata management
+    - **Agents**: AI-powered chat and research agents
+    - **Sheets**: Collaborative spreadsheet and matrix functionality
+    - **Artifacts**: Document templates and generation
+    - **FlashDocs**: PowerPoint and presentation generation
+
+    ## Authentication
+
+    The API supports multiple authentication methods:
+
+    ### Bearer Token (OAuth 2.0)
+    - Primary authentication for user sessions
+    - Tokens issued via Auth0 integration
+    - Include in `Authorization: Bearer <token>` header
+
+    ### API Key
+    - For server-to-server integration
+    - Include in `X-API-Key` header
+    - Contact support for API key provisioning
+
+    ## Rate Limiting
+
+    Default rate limits apply:
+    - **User sessions**: 600 requests per minute
+    - **API keys**: Contact support for higher limits
+
+    Rate limit headers are included in responses:
+    - `X-RateLimit-Limit`: Request limit per window
+    - `X-RateLimit-Remaining`: Requests remaining in window
+    - `X-RateLimit-Reset`: Time when window resets
+
+    ## Pagination
+
+    List endpoints support cursor-based pagination:
+
+    ```json
+    {
+      "items": [...],
+      "pagination": {
+        "cursor": "eyJpZCI6MTIzLCJ0cyI6MTY5...",
+        "has_more": true,
+        "limit": 50
+      }
+    }
+    ```
+
+    Use `cursor` parameter for subsequent requests.
+
+    ## Error Handling
+
+    Errors follow RFC 9457 (Problem Details for HTTP APIs):
+
+    ```json
+    {
+      "detail": "Resource not found",
+      "type": "about:blank",
+      "title": "Not Found",
+      "status": 404,
+      "instance": "/docs/documents/123"
+    }
+    ```
+
+    Common error codes:
+    - `400` - Bad Request: Invalid request parameters
+    - `401` - Unauthorized: Missing or invalid authentication
+    - `403` - Forbidden: Insufficient permissions
+    - `404` - Not Found: Resource does not exist
+    - `422` - Unprocessable Entity: Request validation failed
+    - `429` - Too Many Requests: Rate limit exceeded
+    - `500` - Internal Server Error: Unexpected server error
+
+  version: 1.0.0
+  contact:
+    name: Hebbia API Support
+    url: https://docs.hebbia.ai
+    email: support@hebbia.ai
+  license:
+    name: Proprietary
+    url: https://hebbia.ai/terms
+
+servers:
+  - url: https://api.hebbia.ai
+    description: Production API
+  - url: https://api-staging.hebbia.ai
+    description: Staging API
+  - url: http://localhost:8000
+    description: Local development
+
+security:
+  - bearerAuth: []
+  - apiKeyAuth: []
+
+paths:
+  # Health and System Endpoints
+  /health:
+    get:
+      tags: [System]
+      summary: Health check
+      description: Check API health and availability
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [healthy, degraded, unhealthy]
+                  timestamp:
+                    type: string
+                    format: date-time
+                  services:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        status:
+                          type: string
+                          enum: [healthy, degraded, unhealthy]
+                        response_time_ms:
+                          type: number
+
+  # User Management (Brain Service)
+  /v2/users:
+    get:
+      tags: [Users]
+      summary: List users
+      description: Get a list of users with filtering and pagination
+      operationId: getUsers
+      parameters:
+        - name: cursor
+          in: query
+          description: Pagination cursor
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Number of results per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: email
+          in: query
+          description: Filter by email address
+          schema:
+            type: string
+            format: email
+        - name: org_id
+          in: query
+          description: Filter by organization ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: User list retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    post:
+      tags: [Users]
+      summary: Create user
+      description: Create a new user account
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  /v2/users/{user_id}:
+    get:
+      tags: [Users]
+      summary: Get user
+      description: Retrieve a specific user by ID
+      operationId: getUser
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          description: User ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: User retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags: [Users]
+      summary: Update user
+      description: Update user information
+      operationId: updateUser
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          description: User ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+      responses:
+        '200':
+          description: User updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+
+  # Organization Management (Brain Service)
+  /v2/orgs:
+    get:
+      tags: [Organizations]
+      summary: List organizations
+      description: Get a list of organizations
+      operationId: getOrganizations
+      parameters:
+        - name: cursor
+          in: query
+          description: Pagination cursor
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Number of results per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Organization list retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Organization'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationResponse'
+
+    post:
+      tags: [Organizations]
+      summary: Create organization
+      description: Create a new organization
+      operationId: createOrganization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateOrganizationRequest'
+      responses:
+        '201':
+          description: Organization created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+
+  /v2/orgs/{org_id}:
+    get:
+      tags: [Organizations]
+      summary: Get organization
+      description: Retrieve a specific organization by ID
+      operationId: getOrganization
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          description: Organization ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Organization retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Organization'
+
+  /v2/orgs/{org_id}/members:
+    get:
+      tags: [Organizations]
+      summary: List organization members
+      description: Get members of an organization
+      operationId: getOrganizationMembers
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          description: Organization ID
+          schema:
+            type: string
+            format: uuid
+        - name: cursor
+          in: query
+          description: Pagination cursor
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Number of results per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Organization members retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/OrganizationMember'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationResponse'
+
+  # Document Management (Doc Manager Service)
+  /docs/documents:
+    get:
+      tags: [Documents]
+      summary: Search documents
+      description: Search and filter documents with full-text search capabilities
+      operationId: searchDocuments
+      parameters:
+        - name: q
+          in: query
+          description: Search query
+          schema:
+            type: string
+        - name: document_list_id
+          in: query
+          description: Filter by document list ID
+          schema:
+            type: string
+            format: uuid
+        - name: document_type
+          in: query
+          description: Filter by document type
+          schema:
+            type: string
+            enum: [pdf, docx, xlsx, pptx, txt, html, csv]
+        - name: created_after
+          in: query
+          description: Filter documents created after this date
+          schema:
+            type: string
+            format: date-time
+        - name: created_before
+          in: query
+          description: Filter documents created before this date
+          schema:
+            type: string
+            format: date-time
+        - name: cursor
+          in: query
+          description: Pagination cursor
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Number of results per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Documents retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Document'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationResponse'
+                  search_metadata:
+                    type: object
+                    properties:
+                      total_results:
+                        type: integer
+                      search_time_ms:
+                        type: number
+                      query_processed:
+                        type: string
+
+    post:
+      tags: [Documents]
+      summary: Upload document
+      description: Upload a new document to the platform
+      operationId: uploadDocument
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Document file to upload
+                document_list_id:
+                  type: string
+                  format: uuid
+                  description: Document list to add the document to
+                title:
+                  type: string
+                  description: Optional custom title for the document
+                metadata:
+                  type: object
+                  description: Additional metadata for the document
+              required:
+                - file
+                - document_list_id
+      responses:
+        '201':
+          description: Document uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '413':
+          description: File too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /docs/documents/{document_id}:
+    get:
+      tags: [Documents]
+      summary: Get document
+      description: Retrieve a specific document by ID
+      operationId: getDocument
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          description: Document ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Document'
+
+    delete:
+      tags: [Documents]
+      summary: Delete document
+      description: Delete a document from the platform
+      operationId: deleteDocument
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          description: Document ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Document deleted successfully
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /docs/documents/{document_id}/content:
+    get:
+      tags: [Documents]
+      summary: Get document content
+      description: Retrieve the extracted text content of a document
+      operationId: getDocumentContent
+      parameters:
+        - name: document_id
+          in: path
+          required: true
+          description: Document ID
+          schema:
+            type: string
+            format: uuid
+        - name: format
+          in: query
+          description: Content format
+          schema:
+            type: string
+            enum: [text, html, markdown]
+            default: text
+      responses:
+        '200':
+          description: Document content retrieved successfully
+          content:
+            text/plain:
+              schema:
+                type: string
+            text/html:
+              schema:
+                type: string
+            text/markdown:
+              schema:
+                type: string
+
+  # Document Lists (Collections)
+  /docs/lists:
+    get:
+      tags: [Document Lists]
+      summary: List document collections
+      description: Get document lists/collections for the current user
+      operationId: getDocumentLists
+      parameters:
+        - name: cursor
+          in: query
+          description: Pagination cursor
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Number of results per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Document lists retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DocumentList'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationResponse'
+
+    post:
+      tags: [Document Lists]
+      summary: Create document collection
+      description: Create a new document list/collection
+      operationId: createDocumentList
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDocumentListRequest'
+      responses:
+        '201':
+          description: Document list created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentList'
+
+  /docs/lists/{document_list_id}:
+    get:
+      tags: [Document Lists]
+      summary: Get document collection
+      description: Retrieve a specific document list by ID
+      operationId: getDocumentList
+      parameters:
+        - name: document_list_id
+          in: path
+          required: true
+          description: Document list ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document list retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentList'
+
+  # AI Agents and Chat (Agents Service)
+  /agents/multi-doc-chat:
+    post:
+      tags: [AI Agents]
+      summary: Create multi-document chat
+      description: Start a new conversation with AI agents across multiple documents
+      operationId: createMultiDocChat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateChatRequest'
+      responses:
+        '201':
+          description: Chat conversation created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatConversation'
+
+  /agents/multi-doc-chat/{chat_id}/message:
+    post:
+      tags: [AI Agents]
+      summary: Send message to chat
+      description: Send a message to an existing chat conversation
+      operationId: sendChatMessage
+      parameters:
+        - name: chat_id
+          in: path
+          required: true
+          description: Chat conversation ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+      responses:
+        '200':
+          description: Message sent successfully
+          headers:
+            Transfer-Encoding:
+              schema:
+                type: string
+                enum: [chunked]
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Server-sent events stream with AI response
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /agents/multi-doc-chat/{chat_id}:
+    get:
+      tags: [AI Agents]
+      summary: Get chat conversation
+      description: Retrieve chat conversation details and history
+      operationId: getChatConversation
+      parameters:
+        - name: chat_id
+          in: path
+          required: true
+          description: Chat conversation ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Chat conversation retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatConversation'
+
+  # Sheets/Matrix (Sheets Service)
+  /sheets:
+    get:
+      tags: [Sheets]
+      summary: List sheets
+      description: Get user's spreadsheets/matrices
+      operationId: getSheets
+      parameters:
+        - name: cursor
+          in: query
+          description: Pagination cursor
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Number of results per page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Sheets retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Sheet'
+                  pagination:
+                    $ref: '#/components/schemas/PaginationResponse'
+
+    post:
+      tags: [Sheets]
+      summary: Create sheet
+      description: Create a new spreadsheet/matrix
+      operationId: createSheet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSheetRequest'
+      responses:
+        '201':
+          description: Sheet created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sheet'
+
+  /sheets/{sheet_id}:
+    get:
+      tags: [Sheets]
+      summary: Get sheet
+      description: Retrieve a specific sheet by ID
+      operationId: getSheet
+      parameters:
+        - name: sheet_id
+          in: path
+          required: true
+          description: Sheet ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Sheet retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sheet'
+
+  /sheets/{sheet_id}/cells:
+    get:
+      tags: [Sheets]
+      summary: Get sheet cells
+      description: Retrieve cell data for a sheet
+      operationId: getSheetCells
+      parameters:
+        - name: sheet_id
+          in: path
+          required: true
+          description: Sheet ID
+          schema:
+            type: string
+            format: uuid
+        - name: range
+          in: query
+          description: Cell range (e.g., "A1:D10")
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Sheet cells retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cells:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Cell'
+                  range:
+                    type: string
+
+    patch:
+      tags: [Sheets]
+      summary: Update sheet cells
+      description: Update cell values in a sheet
+      operationId: updateSheetCells
+      parameters:
+        - name: sheet_id
+          in: path
+          required: true
+          description: Sheet ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateCellsRequest'
+      responses:
+        '200':
+          description: Cells updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  updated_cells:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Cell'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: OAuth 2.0 Bearer token from Auth0
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for server-to-server authentication
+
+  schemas:
+    # Core Models
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        picture:
+          type: string
+          format: uri
+          nullable: true
+        platform_role:
+          type: string
+          enum: [user, admin, super_admin]
+        is_locked:
+          type: boolean
+        is_email_verified:
+          type: boolean
+        last_login_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - email
+        - platform_role
+        - is_locked
+        - is_email_verified
+        - created_at
+        - updated_at
+
+    CreateUserRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        email:
+          type: string
+          format: email
+        platform_role:
+          type: string
+          enum: [user, admin]
+          default: user
+      required:
+        - name
+        - email
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        is_locked:
+          type: boolean
+        platform_role:
+          type: string
+          enum: [user, admin, super_admin]
+
+    Organization:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        logo_url:
+          type: string
+          format: uri
+          nullable: true
+        primary_color:
+          type: string
+          pattern: '^#[0-9A-Fa-f]{6}$'
+          nullable: true
+        secondary_color:
+          type: string
+          pattern: '^#[0-9A-Fa-f]{6}$'
+          nullable: true
+        email_domains:
+          type: array
+          items:
+            type: string
+        requires_mfa:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - name
+        - requires_mfa
+        - created_at
+        - updated_at
+
+    CreateOrganizationRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        email_domains:
+          type: array
+          items:
+            type: string
+        requires_mfa:
+          type: boolean
+          default: false
+      required:
+        - name
+
+    OrganizationMember:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        user:
+          $ref: '#/components/schemas/User'
+        role:
+          type: string
+          enum: [member, admin, owner]
+        joined_at:
+          type: string
+          format: date-time
+      required:
+        - user_id
+        - user
+        - role
+        - joined_at
+
+    Document:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        file_name:
+          type: string
+        file_size:
+          type: integer
+          minimum: 0
+        content_type:
+          type: string
+        document_type:
+          type: string
+          enum: [pdf, docx, xlsx, pptx, txt, html, csv, web, local, box, gdrive]
+        status:
+          type: string
+          enum: [uploading, processing, ready, failed]
+        url:
+          type: string
+          format: uri
+          nullable: true
+        thumbnail_url:
+          type: string
+          format: uri
+          nullable: true
+        page_count:
+          type: integer
+          minimum: 0
+          nullable: true
+        word_count:
+          type: integer
+          minimum: 0
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+          format: uuid
+      required:
+        - id
+        - title
+        - file_name
+        - file_size
+        - content_type
+        - document_type
+        - status
+        - created_at
+        - updated_at
+        - created_by
+
+    DocumentList:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        document_count:
+          type: integer
+          minimum: 0
+        is_public:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+          format: uuid
+      required:
+        - id
+        - name
+        - document_count
+        - is_public
+        - created_at
+        - updated_at
+        - created_by
+
+    CreateDocumentListRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description:
+          type: string
+          maxLength: 1000
+        is_public:
+          type: boolean
+          default: false
+      required:
+        - name
+
+    ChatConversation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        document_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        status:
+          type: string
+          enum: [active, completed, failed]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+          format: uuid
+      required:
+        - id
+        - title
+        - document_ids
+        - messages
+        - status
+        - created_at
+        - updated_at
+        - created_by
+
+    ChatMessage:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        content:
+          type: string
+        role:
+          type: string
+          enum: [user, assistant, system]
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Citation'
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - content
+        - role
+        - citations
+        - created_at
+
+    Citation:
+      type: object
+      properties:
+        id:
+          type: integer
+        kind:
+          type: string
+          enum: [text_excerpt, table, excel, url, matrix_cell]
+        quote:
+          type: string
+          nullable: true
+        document_id:
+          type: string
+          format: uuid
+          nullable: true
+        page_number:
+          type: integer
+          nullable: true
+        url:
+          type: string
+          format: uri
+          nullable: true
+      required:
+        - id
+        - kind
+
+    CreateChatRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+        document_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          minItems: 1
+          maxItems: 100
+        initial_message:
+          type: string
+          minLength: 1
+          maxLength: 10000
+      required:
+        - title
+        - document_ids
+        - initial_message
+
+    SendMessageRequest:
+      type: object
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 10000
+        model:
+          type: string
+          enum: [gpt-4, gpt-4-turbo, claude-3-opus, claude-3-sonnet]
+          default: gpt-4-turbo
+      required:
+        - content
+
+    Sheet:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        row_count:
+          type: integer
+          minimum: 0
+        column_count:
+          type: integer
+          minimum: 0
+        version_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [active, archived, deleted]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+          format: uuid
+      required:
+        - id
+        - name
+        - row_count
+        - column_count
+        - version_id
+        - status
+        - created_at
+        - updated_at
+        - created_by
+
+    CreateSheetRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description:
+          type: string
+          maxLength: 1000
+        template_id:
+          type: string
+          format: uuid
+          nullable: true
+      required:
+        - name
+
+    Cell:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        row:
+          type: integer
+          minimum: 0
+        column:
+          type: integer
+          minimum: 0
+        value:
+          oneOf:
+            - type: string
+            - type: number
+            - type: boolean
+            - type: 'null'
+        formula:
+          type: string
+          nullable: true
+        data_type:
+          type: string
+          enum: [text, number, boolean, date, formula]
+        metadata:
+          type: object
+          additionalProperties: true
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - row
+        - column
+        - value
+        - data_type
+        - updated_at
+
+    UpdateCellsRequest:
+      type: object
+      properties:
+        cells:
+          type: array
+          items:
+            type: object
+            properties:
+              row:
+                type: integer
+                minimum: 0
+              column:
+                type: integer
+                minimum: 0
+              value:
+                oneOf:
+                  - type: string
+                  - type: number
+                  - type: boolean
+                  - type: 'null'
+              formula:
+                type: string
+                nullable: true
+            required:
+              - row
+              - column
+              - value
+          minItems: 1
+          maxItems: 1000
+      required:
+        - cells
+
+    # Utility Schemas
+    PaginationResponse:
+      type: object
+      properties:
+        cursor:
+          type: string
+          nullable: true
+          description: Cursor for next page, null if no more pages
+        has_more:
+          type: boolean
+          description: Whether there are more results available
+        limit:
+          type: integer
+          description: Number of items per page
+      required:
+        - has_more
+        - limit
+
+    ErrorResponse:
+      type: object
+      properties:
+        detail:
+          type: string
+          description: Human-readable error message
+        type:
+          type: string
+          format: uri
+          default: about:blank
+          description: URI identifying the problem type
+        title:
+          type: string
+          description: Short, human-readable summary of the problem
+        status:
+          type: integer
+          description: HTTP status code
+        instance:
+          type: string
+          format: uri
+          description: URI identifying the specific occurrence of the problem
+      required:
+        - detail
+
+  responses:
+    BadRequest:
+      description: Bad Request - Invalid request parameters
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            detail: "Invalid request parameters"
+            status: 400
+
+    Unauthorized:
+      description: Unauthorized - Missing or invalid authentication
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            detail: "Authentication required"
+            status: 401
+
+    Forbidden:
+      description: Forbidden - Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            detail: "Insufficient permissions to access this resource"
+            status: 403
+
+    NotFound:
+      description: Not Found - Resource does not exist
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            detail: "Resource not found"
+            status: 404
+
+    ValidationError:
+      description: Unprocessable Entity - Request validation failed
+      content:
+        application/json:
+          schema:
+            allOf:
+              - $ref: '#/components/schemas/ErrorResponse'
+              - type: object
+                properties:
+                  detail:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        loc:
+                          type: array
+                          items:
+                            oneOf:
+                              - type: string
+                              - type: integer
+                        msg:
+                          type: string
+                        type:
+                          type: string
+          example:
+            detail:
+              - loc: ["body", "email"]
+                msg: "field required"
+                type: "value_error.missing"
+            status: 422
+
+    RateLimited:
+      description: Too Many Requests - Rate limit exceeded
+      headers:
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+          description: Request limit per window
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+          description: Requests remaining in current window
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+          description: Time when rate limit window resets (Unix timestamp)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            detail: "Rate limit exceeded. Try again later."
+            status: 429
+
+tags:
+  - name: System
+    description: System health and status endpoints
+  - name: Users
+    description: User account management
+  - name: Organizations
+    description: Organization and team management
+  - name: Documents
+    description: Document upload, search, and management
+  - name: Document Lists
+    description: Document collections and organization
+  - name: AI Agents
+    description: AI-powered chat and research agents
+  - name: Sheets
+    description: Collaborative spreadsheet and matrix functionality
