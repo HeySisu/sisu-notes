@@ -1,0 +1,25 @@
+# Custom Cursor Rules for Sisu Notes Workspace
+
+## Auto-sync Mono Analysis Repository
+Before executing any terminal command, automatically navigate to the `~/Hebbia/mono_analysis` repository and run `git pull` to ensure it's up to date.
+
+**Rule:**
+- **Trigger:** Before any `run_terminal_cmd` execution
+- **Action:**
+  1. Change directory to `~/Hebbia/mono_analysis`
+  2. Run `git pull` to fetch latest changes
+  3. Return to original working directory
+  4. Proceed with the requested command
+
+**Implementation:**
+```bash
+# Auto-sync before any command
+cd ~/Hebbia/mono_analysis && git pull && cd -
+```
+
+**Purpose:** Ensures the mono analysis repository is always synchronized with the latest changes before running any commands that might depend on its contents.
+
+## Additional Context
+- This workspace contains notes, documentation, and analysis related to Hebbia's mono architecture
+- The mono_analysis repository contains the latest analysis and insights
+- Keeping it synchronized ensures all commands have access to the most current information

@@ -34,13 +34,10 @@ import psycopg2
 from typing import List, Dict, Any
 
 try:
-    from .config import STAGING_DB_PASSWORD, PROD_DB_PASSWORD
+    from config import STAGING_DB_PASSWORD, PROD_DB_PASSWORD
 except ImportError:
-    try:
-        from config import STAGING_DB_PASSWORD, PROD_DB_PASSWORD
-    except ImportError:
-        print("❌ Configuration not found. Please ensure tools/config.py exists with database passwords.")
-        sys.exit(1)
+    print("❌ Configuration not found. Please ensure tools/config.py exists with database passwords.")
+    sys.exit(1)
 
 class HebbiaDatabaseExplorer:
     def __init__(self, environment='staging'):

@@ -1,0 +1,1 @@
+Cogency, Compassion, Running hard, and Readiness
