@@ -68,7 +68,6 @@ class HebbiaDatabaseExplorer:
         try:
             self.conn = psycopg2.connect(**self.connection_params)
             self.cursor = self.conn.cursor()
-            print(f"🔒 Connected with readonly user ({self.environment} environment)")
             return True
         except Exception as e:
             print(f"❌ Connection failed: {e}")
@@ -127,19 +126,13 @@ For complete database knowledge and examples, see:
 
     args = parser.parse_args()
 
-    # Validate environment
-    if args.env == 'prod':
-        print("⚠️  Connecting to PRODUCTION database (read-only)")
-    else:
-        print("📍 Connecting to STAGING database")
-
     db = HebbiaDatabaseExplorer(args.env)
 
     if not db.connect():
         return
 
     try:
-        print(f"✅ Connected to Hebbia database (readonly user, {args.env} environment)")
+        print(f"✅ Connected to Hebbia {args.env} database (readonly user)")
         results = db.execute_query(args.query)
 
         if results:
