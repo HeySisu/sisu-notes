@@ -3,6 +3,8 @@
 ## 🔗 Code Access
 - **Mono Repository**: Backend codebase for code exploration
 - **Auto-sync**: See `auto_sync_mono.mdc` for sync instructions
+- When referencing code from the local `mono` directory, map it to the GitHub repository with line numbers. For example: local file `mono/sheets/utils/cells.py` maps to https://github.com/hebbia/mono/blob/main/sheets/utils/cells.py#L47-L54
+
 
 ## 🛠️ Tools
 
