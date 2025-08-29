@@ -25,7 +25,7 @@
 
 The comprehensive logging infrastructure identified in the previous report has been successfully implemented in production:
 
-**File**: `sheets/cortex/ssrm/get_rows_utils.py:450-474`
+**File**: https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py#L450-L474
 
 ```python
 logging.info(
@@ -67,7 +67,7 @@ The logging infrastructure provides detailed performance tracking including:
 
 #### Code Location Where Query Executes
 
-**File**: `sheets/data_layer/cells.py:1810-1825`
+**File**: https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L1810-L1825
 ```python
 def _latest_cells_query(
     sheet_id: str,
@@ -90,7 +90,7 @@ def _latest_cells_query(
     return query
 ```
 
-**Called From**: `sheets/data_layer/cells.py:955-965`
+**Called From**: https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L955-L965
 ```python
 async def get_latest_cells(
     sheet_id: str,
@@ -103,7 +103,7 @@ async def get_latest_cells(
         return result.scalars().all()
 ```
 
-**Ultimate Caller**: `sheets/cortex/ssrm/get_rows_utils.py:264-295`
+**Ultimate Caller**: https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py#L264-L295
 ```python
 async def run_get_rows_db_queries(
     sheet_props: SheetProps,
@@ -205,7 +205,7 @@ LIMIT 100;
 
 #### Code Location Where Cache Validation Executes
 
-**File**: `sheets/data_layer/cells.py:1834-1844`
+**File**: https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L1834-L1844
 ```python
 async def _latest_cells_updated_at(
     sheet_id: str,
@@ -222,7 +222,7 @@ async def _latest_cells_updated_at(
         return result.scalar()
 ```
 
-**Called From**: `sheets/data_layer/cells.py:943-950`
+**Called From**: https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L943-L950
 ```python
 async def get_latest_cells_with_cache_validation(
     sheet_id: str,
@@ -238,7 +238,7 @@ async def get_latest_cells_with_cache_validation(
     # ... rest of function
 ```
 
-**Ultimate Caller**: `sheets/cortex/ssrm/get_rows_utils.py:285-295`
+**Ultimate Caller**: https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py#L285-L295
 ```python
 async def run_get_rows_db_queries(
     sheet_props: SheetProps,
@@ -368,7 +368,7 @@ effective_io_concurrency: 1             -- TOO LOW
 
 ### Problem 2: Memory Slicing Anti-Pattern
 
-**Code Location**: `sheets/cortex/ssrm/get_rows_utils.py:264-265`
+**Code Location**: https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py#L264-L265
 
 ```python
 # Filter rows ids based on requested range
@@ -378,7 +378,7 @@ if req.start_idx is not None and req.end_idx is not None:
 
 **Issue**: Application fetches ALL rows from database, then slices in memory. For a sheet with 830K cells requesting rows 0-100, this fetches 830K rows and throws away 829,900 rows.
 
-**Additional Location**: `sheets/routes/sheets.py:2063`
+**Additional Location**: https://github.com/hebbia/mono/blob/main/sheets/routes/sheets.py#L2063
 
 ```python
 # Split the rows into batches of 500 to keep the cells query reasonable
@@ -439,14 +439,14 @@ SELECT state, count(*) FROM pg_stat_activity WHERE pid != pg_backend_pid() GROUP
 
 #### Root Cause: RDS Proxy Timeout Configuration
 
-**Infrastructure Configuration**: `infra/service-classic/postgres_rds_proxy.tf`
+**Infrastructure Configuration**: https://github.com/hebbia/mono/blob/main/infra/service-classic/postgres_rds_proxy.tf
 ```terraform
 connection_borrow_timeout    = 120  # 2 MINUTES - MATCHES DATADOG TIMING!
 max_connections_percent      = 90   # 90% of 12,000 = 10,800 max
 max_idle_connections_percent = 50   # 50% can be idle = 5,400 idle max
 ```
 
-**Application Pool Configuration**: `topology/app_config/prod.system_topology.yaml`
+**Application Pool Configuration**: https://github.com/hebbia/mono/blob/main/topology/app_config/prod.system_topology.yaml
 ```yaml
 CORE_DB_POOL_SIZE: "30"  # Production database pool size per service
 ```
@@ -471,7 +471,7 @@ Application Request → RDS Proxy Pool → Wait up to 120s → Database Connecti
 
 **Immediate Action Required**: Update RDS Proxy timeout and connection settings
 
-**File**: `infra/service-classic/postgres_rds_proxy.tf`
+**File**: https://github.com/hebbia/mono/blob/main/infra/service-classic/postgres_rds_proxy.tf
 ```terraform
 # BEFORE (causing 2-minute waits):
 connection_borrow_timeout    = 120  # 2 minutes
@@ -501,7 +501,7 @@ max_idle_connections_percent = 30   # Reduce from 50% to 30% (more active connec
 
 #### Code Location Where Hydration Executes
 
-**File**: `sheets/data_layer/cells.py:1217-1272`
+**File**: https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L1217-L1272
 ```python
 async def hydrate_rows(
     sheet_id: str,
@@ -841,7 +841,7 @@ WHERE name IN ('work_mem', 'effective_io_concurrency');
 
 **Code Changes Needed:**
 ```python
-# sheets/cortex/ssrm/get_rows_utils.py
+# https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py
 # Replace memory slicing with database-level pagination
 def get_relevant_rows_with_pagination(
     sheet_id: str,
@@ -1117,7 +1117,7 @@ ORDER BY pg_relation_size(indexname::regclass) DESC;
 ### Query Pattern Analysis (Production Evidence)
 ```sql
 -- Actual problematic query from production code (71% of execution time)
--- From: sheets/data_layer/cells.py:1810-1825
+-- From: https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L1810-L1825
 EXPLAIN (ANALYZE, BUFFERS) SELECT DISTINCT ON (cell_hash) *
 FROM cells
 WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
@@ -1131,7 +1131,7 @@ ORDER BY cell_hash, updated_at DESC;
 -- Buffers: temp read=54715 written=88595
 
 -- Cache validation query from production (18% of execution time)
--- From: sheets/data_layer/cells.py:1834-1844
+-- From: https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L1834-L1844
 EXPLAIN (ANALYZE, BUFFERS) SELECT MAX(updated_at)
 FROM cells
 WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
