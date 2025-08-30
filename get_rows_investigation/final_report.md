@@ -14,7 +14,7 @@ Critical database performance issues persist. Two missing indexes cause 48+ seco
 | **Action Item 4: RDS Proxy** | ⚠️ PARTIAL | 2-minute connection waits | HIGH |
 | **Action Item 5: SQLAlchemy Pool** | ❌ NOT FIXED | 3-4 second reconnection delays | HIGH |
 | **Action Item 6: DB Config** | ❌ NOT FIXED | 272MB disk spills, work_mem=4MB | MEDIUM |
-| **Action Item 7: Hydration** | ✅ ACCEPTABLE | 29ms performance (not 2+ seconds) | LOW |
+| **Action Item 7: Hydration** | ❌ NOT FIXED | 2+ second delays from DISTINCT ON CTE | HIGH |
 
 ---
 
@@ -279,13 +279,24 @@ SELECT pg_reload_conf();
 
 ---
 
-## Action Item 7: Hydration Performance - ✅ ACCEPTABLE
+## Action Item 7: Hydration Performance - ❌ CAUSED BY SAME INDEX ISSUES
 
-### Status: Not a Critical Issue
+### Root Cause: Uses Same Problematic DISTINCT ON Query
 
-Production testing shows 29.7ms performance using existing index `ix_rows_unique_sheet_id_tab_id_row_order`.
+The `hydrate_rows()` function at [cells.py:L1217-L1272](https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L1217-L1272) uses `_latest_cells_query()` as a CTE:
 
-29.7ms performance is acceptable. The 2+ second delays in DataDog are from the cells DISTINCT ON bottleneck (Action Item 2), not rows performance.
+```python
+# Line 1236-1240: Creates CTE with the problematic DISTINCT ON query
+latest_cells_query = _latest_cells_query(sheet_id, active_tab_id, column_ids)
+latest_cells_query = latest_cells_query.where(Cell.row_id.in_(row_ids))
+latest_cells_cte = latest_cells_query.cte("latest_cells")
+
+# Then joins with rows table...
+```
+
+**Impact**: The 2+ second hydration delays are directly caused by the missing indexes from Action Items 2 & 3. The rows table query (29.7ms) is fine, but the CTE with DISTINCT ON causes the bottleneck.
+
+**Will be fixed by**: Implementing indexes from Action Items 2 & 3
 
 ---
 
