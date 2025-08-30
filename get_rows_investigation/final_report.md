@@ -78,7 +78,7 @@ def _latest_cells_query(
     return query
 ```
 
-**Called via**: `get_latest_cells()` → `run_get_rows_db_queries()`  
+**Called via**: [`get_latest_cells()`](https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L955-L965) → [`run_get_rows_db_queries()`](https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py#L264-L295)  
 **Impact**: 71% of total execution time
 
 #### Performance Impact
@@ -123,7 +123,7 @@ async def _latest_cells_updated_at(
         return result.scalar()
 ```
 
-**Called via**: `get_latest_cells_with_cache_validation()` → `run_get_rows_db_queries()`  
+**Called via**: [`get_latest_cells_with_cache_validation()`](https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L943-L950) → [`run_get_rows_db_queries()`](https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py#L285-L295)  
 **Impact**: 18% of total execution time
 
 #### Performance Impact
@@ -275,7 +275,7 @@ ALTER SYSTEM SET effective_io_concurrency = '200'; # From 1
 SELECT pg_reload_conf();
 ```
 
-**Also needed**: Database-level pagination at get_rows_utils.py:L264-L265 (currently fetches ALL rows then slices)
+**Also needed**: Database-level pagination at [get_rows_utils.py:L264-L265](https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py#L264-L265) (currently fetches ALL rows then slices)
 
 ---
 
