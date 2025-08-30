@@ -11,7 +11,8 @@
 | **✅ Action Item 1** | **COMPLETED** | Logging infrastructure deployed | ✅ Done |
 | **🚨 Action Item 2** | **EXTREME CRISIS** | **Cache validation 48+ second delays (111x worse than reported)** | ⚡ EXTREME |
 | **🚨 Action Item 3** | **NOT IMPLEMENTED** | **71% query time bottleneck remains** | ⚡ CRITICAL |
-| **🚨 Action Item 4** | **CRITICAL ISSUE** | **Connection times of 1+ minutes persist** | ⚡ CRITICAL |
+| **🚨 Action Item 4** | **PARTIALLY FIXED** | **RDS Proxy fixed, but app pooling issue found** | ⚡ CRITICAL |
+| **🚨 Action Item 4B** | **NEW ROOT CAUSE** | **LIFO pooling causes 3-4s reconnection delays** | ⚡ CRITICAL |
 | **🔴 Action Item 5** | **NOT IMPLEMENTED** | **Database misconfiguration persists** | 🔴 HIGH |
 | **🟡 Action Item 6** | **MODERATE ISSUE** | **Hydration 29ms delays (67x better than reported)** | 🟡 MODERATE |
 
@@ -490,6 +491,159 @@ max_idle_connections_percent = 30   # Reduce from 50% to 30% (more active connec
 **Deployment**: Terraform apply during maintenance window (requires brief RDS Proxy restart)
 
 **Status**: Connection issue is **RDS Proxy configuration problem**, not database capacity issue 🚨
+
+---
+
+## Action Item 4B: Fix Application Connection Pool Strategy (🚨 NEW CRITICAL ISSUE - ROOT CAUSE)
+
+### Problem: LIFO Connection Pooling Causes Idle Connection Timeouts
+
+**CRITICAL FINDING (2025-08-30)**: Investigation of persistent connection delays in staging revealed that while RDS Proxy configuration was fixed, the application's connection pooling strategy causes periodic 3-4 second reconnection delays.
+
+#### Root Cause Analysis
+
+**The Connection Lifecycle Problem**:
+```
+Time 0:00 - Application starts, creates 20 connections in pool
+Time 0:01 - App uses connections 1-4 repeatedly (LIFO = Last In, First Out)
+Time 0:02 - Connections 5-20 sit idle, unused
+...
+Time 0:30 - RDS Proxy kills connections 5-20 (30 min IdleClientTimeout)
+Time 0:31 - Traffic spike! App needs connection #5
+         - App tries to use connection #5
+         - pool_pre_ping checks: "SELECT 1" 
+         - Connection is DEAD (proxy killed it)
+         - Must establish NEW connection:
+           * DNS lookup (~100ms)
+           * TCP handshake (~200ms)  
+           * TLS negotiation (~1-2s)
+           * PostgreSQL auth (~1s)
+         = Total: 3-4 seconds delay!
+```
+
+#### Technical Deep Dive: LIFO vs FIFO Connection Pooling
+
+**Current Implementation (LIFO - Last In, First Out)**:
+- Works like a **stack of plates** - you always take from and return to the top
+- Recently used connections get reused immediately
+- Older connections at the bottom never get touched
+- Original intent: Let idle connections timeout to "save resources"
+- Reality: Causes 3-4 second reconnection delays when idle connections are needed
+
+**Proposed Solution (FIFO - First In, First Out)**:
+- Works like a **queue/line** - connections cycle through in order
+- Each connection gets equal usage time
+- Natural rotation prevents any connection from idling too long
+- Result: All connections stay "warm" and never hit the 30-minute timeout
+- **Trade-off**: Uses 20 active connections instead of 4 (negligible with 12,000 available)
+
+#### Code Location and Fix
+
+**File**: https://github.com/hebbia/mono/blob/main/python_lib/storage/database_connection/session_provider.py#L98
+```python
+# BEFORE (Current problematic configuration):
+pool_use_lifo=True,  # enable a StackQueue so idle connections can time out
+
+# AFTER (Fixed configuration):
+pool_use_lifo=False,  # use FIFO to rotate through all connections evenly
+```
+
+#### Evidence from Staging Investigation
+
+**CloudWatch Metrics Analysis**:
+- RDS Proxy borrow latency: 1-3ms (excellent) ✅
+- Query response latency: 2-5ms (excellent) ✅
+- Client connections: 25 total
+- Actively borrowed: Only 1-4 connections (16% utilization)
+- Connection establishment rate: 1-13 per 10 minutes (very low)
+- **Connection time spikes**: 3-4 seconds (matches reconnection overhead)
+
+**Key Configuration Parameters**:
+- RDS Proxy `IdleClientTimeout`: 1800 seconds (30 minutes)
+- Application `CORE_DB_POOL_SIZE`: 20 (staging)
+- SQLAlchemy `pool_use_lifo`: True (the problem)
+- SQLAlchemy `pool_pre_ping`: True (detects dead connections)
+
+### Solution Implementation
+
+**Single Line Code Change**:
+```python
+# In session_provider.py, line 98:
+pool_use_lifo=False,  # Changed from True
+```
+
+**How FIFO Solves the Problem**:
+```
+With FIFO rotation pattern:
+- Connection 1 used → returns to position 20
+- Connection 2 used → returns to position 20
+- Connection 3 used → returns to position 20
+...
+- Connection 20 used → returns to position 20
+- Back to Connection 1 (full rotation in ~5-10 minutes)
+
+Result: Every connection used within 30-minute window = No timeouts!
+```
+
+### Expected Impact
+
+**Before Fix**:
+- Periodic 3-4 second connection time spikes
+- Occurs when traffic increases after quiet periods
+- Worse during off-peak hours when most connections idle
+
+**After Fix**:
+- Consistent <100ms connection times
+- No reconnection overhead
+- Stable performance regardless of traffic patterns
+
+### Why FIFO is the Right Choice
+
+**Performance vs Resources Trade-off**:
+- **Resource "savings" from LIFO**: 16 fewer persistent connections (out of 12,000 available)
+- **Performance cost of LIFO**: 3-4 second delays affecting user experience
+- **Decision**: Predictable <100ms performance is worth using 0.13% more database connections
+
+**The original LIFO design assumed**:
+- Letting connections timeout saves meaningful resources ❌
+- Reconnection overhead is acceptable ❌
+- Database connections are scarce ❌
+
+**Reality**:
+- Database has 12,000 connection capacity (currently using <20%)
+- Reconnection takes 3-4 seconds (unacceptable user experience)
+- 20 persistent connections is negligible overhead
+
+### Deployment Plan
+
+1. **Test in Staging First**:
+```bash
+# Monitor before change
+aws cloudwatch get-metric-statistics \
+  --namespace AWS/RDS \
+  --metric-name DatabaseConnectionsSetupSucceeded \
+  --dimensions Name=ProxyName,Value=hebbia-backend-postgres-staging
+
+# Deploy code change
+# Update session_provider.py with pool_use_lifo=False
+
+# Monitor after change - should see stable connection times
+```
+
+2. **Production Deployment**:
+- Apply same change to production after staging validation
+- No downtime required (connection pool naturally refreshes)
+- Monitor connection metrics for 24 hours
+
+### Alternative Solutions (Not Recommended)
+
+These alternatives were considered but are unnecessary given the clear benefit of FIFO:
+
+1. **Keep LIFO + Reduce IdleClientTimeout**: Still causes spikes, just more frequently
+2. **Keep LIFO + Reduce Pool Size**: Might hit capacity limits during traffic spikes  
+3. **Keep LIFO + Add Keepalive**: Complex solution for a simple problem
+
+**Clear Recommendation**: FIFO is the simplest, most effective solution with negligible downsides.
 
 ---
 
