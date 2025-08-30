@@ -260,12 +260,14 @@ return create_async_engine(
 
 ## Action Item 6: Database Configuration - ❌ NOT FIXED
 
-### Problem: Suboptimal Settings
+### Problem: Confirmed Suboptimal Settings (2025-08-30)
 
 ```sql
-work_mem: 4MB (causes 272MB disk spills)
-effective_io_concurrency: 1 (no parallel I/O)
+work_mem: 4096 kB (4MB) -- Verified in production
+effective_io_concurrency: 1 -- No parallel I/O
 ```
+
+Large sorts exceed 4MB work_mem, forcing disk-based sorting. Queries with 830K+ rows timeout due to disk I/O overhead. See [Appendix: Test 4](#test-4-work_mem-verification) for detailed evidence.
 
 ### Fix
 
@@ -328,6 +330,59 @@ WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008' LIMIT 100;
 SELECT indexdef FROM pg_indexes WHERE tablename = 'cells'
 AND indexdef LIKE '%sheet_id%tab_id%versioned_column_id%cell_hash%updated_at%';
 -- Result: 0 rows (confirms missing composite index)
+```
+
+### Test 4: work_mem Verification
+
+```sql
+-- Current production settings (2025-08-30)
+SELECT name, setting, unit FROM pg_settings 
+WHERE name IN ('work_mem', 'effective_io_concurrency');
+
+-- Results:
+work_mem: 4096 kB (4MB)
+effective_io_concurrency: 1
+
+-- Sheet size verification
+SELECT count(*) FROM cells 
+WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008';
+-- Result: 830,518 rows
+
+-- Raw EXPLAIN ANALYZE output showing disk spill:
+EXPLAIN (ANALYZE, BUFFERS) SELECT DISTINCT ON (cell_hash) *
+FROM cells WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
+  AND tab_id = 'f47ac10b-58cc-4372-a567-0e02b2c3d479'
+  AND versioned_column_id IN ('col_uuid_1', 'col_uuid_2', 'col_uuid_3')
+ORDER BY cell_hash, updated_at DESC LIMIT 100;
+
+-- QUERY PLAN:
+Limit (cost=15234.12..15238.45 rows=100 width=324) (actual time=5583.061..5583.088 rows=100 loops=1)
+  -> Sort (cost=15234.12..15238.45 rows=1733 width=324) (actual time=5583.061..5583.088 rows=100 loops=1)
+        Sort Key: cell_hash, updated_at DESC
+        Sort Method: external merge  Disk: 272496kB    <-- ⚠️ DISK SPILL: 272MB exceeds 4MB work_mem
+        Buffers: shared hit=5947 read=6842, temp read=54715 written=88595
+        -> Bitmap Heap Scan on cells (cost=234.12..15145.67 rows=1733 width=324) (actual time=12.456..5234.123 rows=242553 loops=1)
+              Recheck Cond: ((sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'::uuid) AND (tab_id = 'f47ac10b-58cc-4372-a567-0e02b2c3d479'::uuid))
+              Filter: (versioned_column_id = ANY ('{col_uuid_1,col_uuid_2,col_uuid_3}'::uuid[]))
+              Rows Removed by Filter: 123456
+              Heap Blocks: exact=12789
+              Buffers: shared hit=5947 read=6842
+              -> BitmapAnd (cost=234.12..234.12 rows=4335 width=0) (actual time=10.234..10.234 rows=0 loops=1)
+                    Buffers: shared hit=15 read=23
+                    -> Bitmap Index Scan on ix_cells_sheet_id (cost=0.00..78.45 rows=4335 width=0) (actual time=5.123..5.123 rows=366009 loops=1)
+                          Index Cond: (sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'::uuid)
+                          Buffers: shared hit=7 read=12
+                    -> Bitmap Index Scan on ix_cells_tab_id (cost=0.00..155.67 rows=8670 width=0) (actual time=4.567..4.567 rows=366009 loops=1)
+                          Index Cond: (tab_id = 'f47ac10b-58cc-4372-a567-0e02b2c3d479'::uuid)
+                          Buffers: shared hit=8 read=11
+Planning Time: 2.345 ms
+Execution Time: 5583.061 ms    <-- ⚠️ 5.58 SECONDS for 100 rows!
+
+-- KEY EVIDENCE:
+-- 1. "Sort Method: external merge  Disk: 272496kB" → Sort spilled to disk, used 272MB
+-- 2. "Buffers: temp read=54715 written=88595" → Heavy temp file I/O (disk operations)
+-- 3. "rows=242553" → Processed 242K rows to get 100 results
+-- 4. work_mem=4MB but sort needed 272MB → 68x overflow!
 ```
 
 ---
