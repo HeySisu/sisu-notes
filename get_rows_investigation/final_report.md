@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-Critical database performance issues persist. Two missing indexes cause 48+ second cache validation and 120+ second query timeouts. Connection pooling misconfiguration adds 4+ second delays.
+Critical database performance issues persist. Two missing indexes cause 48+ second cache validation and 120+ second query timeouts. LIFO pooling with RDS Proxy idle timeout causes 4+ second connection delays.
 
 ### Current Status
 
@@ -98,19 +98,21 @@ IdleClientTimeout: 1800  # Kills idle connections after 30 min
 RequireTLS: true         # 2-3s TLS handshake for new connections
 ```
 
-**Evidence**: 
-- 25 client connections → 4,390 DB connections (175x amplification)
-- Connections 6-20 idle for 30 min → killed by proxy → 4+ second TLS re-establishment
+**Evidence**:
+- LIFO pooling causes connections 6-20 to remain idle
+- After 30 min, RDS Proxy kills idle connections
+- Traffic spikes require new connections → 2-3s TLS handshake → 4+ second delays
 
 ### Fix Options
 
 ```python
-# Option A: NullPool (Recommended)
-poolclass=NullPool  # Let RDS Proxy handle ALL pooling
-
-# Option B: Switch to FIFO
+# Option A: Switch to FIFO (Quick Fix)
 pool_use_lifo=False  # Rotate through all connections evenly
 pool_recycle=1200    # 20 min < 30 min timeout
+
+# Option B: NullPool (Best Practice)
+poolclass=NullPool  # Let RDS Proxy handle ALL pooling
+# Eliminates double pooling entirely
 ```
 
 ---
@@ -190,15 +192,16 @@ Limit (actual time=5583.061..5583.088 rows=100)
 ### Connection Analysis
 
 ```sql
--- 99.98% connections via proxy (NULL client_addr)
-Via RDS Proxy: 4,390 connections
-Direct: 1 connection
+-- Connection distribution (NULL client_addr = via proxy)
+Via RDS Proxy: 4,390 (99.98%)
+Direct: 1 (0.02%)
 
--- But only 25 client connections to proxy
--- 175x amplification due to double pooling
+-- Note: The 4,390 are mostly reserved slots (NULL state), not active connections
+-- RDS Proxy pre-allocates connection slots for multiplexing
+-- Actual active connections: ~25 (from CloudWatch metrics)
 ```
 
 ---
 
-*Report Date: 2025-08-30*
+*Report Date: 2025-08-30*  
 *Next Steps: Deploy missing indexes immediately (Action Items 2 & 3)*
