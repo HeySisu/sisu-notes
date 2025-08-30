@@ -294,9 +294,14 @@ Time 0:31 - Traffic spike! App needs connection #5
          = Total: 3-4 seconds delay!
 ```
 
-SQLAlchemy Documentation: "When using external connection pooling, disable SQLAlchemy's built-in pool. Use NullPool to prevent double pooling."
+**SQLAlchemy Official Documentation** ([Connection Pooling Guide](https://docs.sqlalchemy.org/en/20/core/pooling.html#using-connection-pools-with-multiprocessing-or-os-fork)):
+> "When using external connection pooling, disable SQLAlchemy's built-in pool"  
+> "Use NullPool to prevent double pooling"
 
-Current issue: App pool LIFO keeps connections 5-20 idle while reusing 1-4. After 30min idle timeout, reconnection takes 3-4 seconds.
+**AWS RDS Proxy Documentation** ([RDS User Guide](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy.html)):
+> "RDS Proxy establishes a database connection pool and reuses connections"
+
+Current issue: App pool LIFO keeps connections 5-20 idle while reusing 1-4. After 30min idle timeout, reconnection takes 3-4 seconds. This "double pooling" anti-pattern violates SQLAlchemy's explicit guidance for external connection pools like RDS Proxy.
 
 #### Code Location
 
@@ -455,7 +460,6 @@ AND indexdef LIKE '%sheet_id%tab_id%versioned_column_id%cell_hash%updated_at%';
 *Report Date: 2025-08-30*  
 *Status: Critical database performance issues identified*  
 *Next Steps: Deploy missing indexes immediately*
-
 
 ---
 
