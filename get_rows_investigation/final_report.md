@@ -171,7 +171,7 @@ max_idle_connections_percent = 30  # From 50%
 
 ### Problem: Double Pooling Anti-Pattern
 
-SQLAlchemy maintains app-level connection pool on top of RDS Proxy, violating official documentation.
+SQLAlchemy maintains app-level connection pool on top of RDS Proxy, creating inefficiencies.
 
 #### Connection Lifecycle Problem
 ```
@@ -192,14 +192,14 @@ Time 0:31 - Traffic spike! App needs connection #5
          = Total: 3-4 seconds delay!
 ```
 
-**SQLAlchemy Official Documentation** ([Connection Pooling Guide](https://docs.sqlalchemy.org/en/20/core/pooling.html#using-connection-pools-with-multiprocessing-or-os-fork)):
-> "When using external connection pooling, disable SQLAlchemy's built-in pool"  
-> "Use NullPool to prevent double pooling"
-
 **AWS RDS Proxy Documentation** ([RDS User Guide](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy.html)):
-> "RDS Proxy establishes a database connection pool and reuses connections"
+> "RDS Proxy establishes a database connection pool and reuses connections in this pool"  
+> "This approach avoids the memory and CPU overhead of opening a new database connection each time"
 
-Current issue: App pool LIFO keeps connections 5-20 idle while reusing 1-4. After 30min idle timeout, reconnection takes 3-4 seconds. This "double pooling" anti-pattern violates SQLAlchemy's explicit guidance for external connection pools like RDS Proxy.
+**SQLAlchemy NullPool** ([Official Docs](https://docs.sqlalchemy.org/en/20/core/pooling.html#sqlalchemy.pool.NullPool)):
+> "Opens and closes the underlying DB-API connection per each connection open/close"
+
+Current issue: App pool LIFO keeps connections 5-20 idle while reusing 1-4. After 30min idle timeout, reconnection takes 3-4 seconds. This "double pooling" anti-pattern is inefficient when RDS Proxy already provides connection pooling.
 
 #### Code Location
 
@@ -227,7 +227,9 @@ return create_async_engine(
 )
 ```
 
-### Fix
+### Fix Options
+
+#### Option A: Use NullPool (Recommended)
 
 ```python
 # session_provider.py
@@ -240,15 +242,43 @@ return create_async_engine(
 )
 ```
 
-**Expected**: Eliminate 3-4 second reconnection delays
+**Expected**: Eliminate 3-4 second reconnection delays by delegating all pooling to RDS Proxy
+
+#### Option B: Switch from LIFO to FIFO Queue
+
+```python
+# session_provider.py
+return create_async_engine(
+    async_config.url,
+    pool_size=async_config.pool_size,
+    max_overflow=async_config.max_overflow,
+    pool_recycle=1800,  # Reduce from 3600 to 30 minutes (match RDS Proxy timeout)
+    pool_use_lifo=False,  # CHANGE: Use FIFO instead of LIFO
+    pool_pre_ping=True,
+    **engine_kwargs,
+)
+```
+
+**How FIFO helps**:
+- **LIFO Problem**: Reuses connections 1-4 repeatedly while 5-20 sit idle until proxy kills them
+- **FIFO Solution**: Rotates through all connections evenly, keeping them all warm
+- **Result**: Connections stay active, avoiding the 30-minute idle timeout
+
+**Comparison**:
+| Approach | Pros | Cons |
+|----------|------|------|
+| **NullPool** | No double pooling, simpler architecture, follows AWS patterns | Slightly more overhead per connection |
+| **FIFO Queue** | Keeps existing pooling benefits, minimal code change | Still maintains double pooling, must tune pool_recycle |
+
+**Expected**: FIFO would reduce reconnection delays from 3-4 seconds to near zero for warm connections
 
 ### Why NullPool is Correct
 
-**Industry consensus**:
+**Industry best practices**:
 
-- **AWS**: Recommends NullPool for Lambda/RDS Proxy ([AWS Blog](https://aws.amazon.com/blogs/database/improving-application-availability-with-amazon-rds-proxy/))
-- **Creditsafe**: 40% reduction in connections with NullPool ([Case Study](https://medium.com/creditsafe/optimising-aws-lambda-database-connections-with-sqlalchemy-and-rds-proxy-a48c0ec736a4))
-- **SQLAlchemy**: "Use NullPool with external pooling" ([Official Docs](https://docs.sqlalchemy.org/en/20/core/pooling.html))
+- **Creditsafe**: 40% reduction in connections with NullPool + RDS Proxy ([Case Study](https://medium.com/creditsafe/optimising-aws-lambda-database-connections-with-sqlalchemy-and-rds-proxy-a48c0ec736a4))
+- **AWS Pattern**: RDS Proxy handles pooling, applications use NullPool to avoid double pooling
+- **SQLAlchemy NullPool**: Designed for scenarios where external pooling is preferred ([Official Docs](https://docs.sqlalchemy.org/en/20/core/pooling.html#sqlalchemy.pool.NullPool))
 
 **Connection rejection happens when**:
 
