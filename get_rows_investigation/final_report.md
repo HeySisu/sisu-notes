@@ -275,8 +275,6 @@ ALTER SYSTEM SET effective_io_concurrency = '200'; # From 1
 SELECT pg_reload_conf();
 ```
 
-**Also needed**: Database-level pagination at [get_rows_utils.py:L264-L265](https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py#L264-L265) (currently fetches ALL rows then slices)
-
 ---
 
 ## Action Item 7: Hydration Performance - ✅ ACCEPTABLE
