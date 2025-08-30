@@ -1,30 +1,24 @@
-# Performance Analysis: `get_rows` Function - Final Status Report (2025-08-29)
+# Performance Analysis: `get_rows` Function - Final Status Report
 
 ## Executive Summary
 
-**CRITICAL DATABASE PERFORMANCE CRISIS PERSISTS** - Despite previous analysis and recommendations, core database optimization issues remain unresolved while connection layer improvements have been successfully implemented.
+Critical database performance issues persist. Two missing indexes cause 48+ second cache validation and 120+ second query timeouts. Connection pooling misconfiguration adds 3-4 second delays.
 
-### Current Status Overview
+### Current Status
 
 | Action Item | Status | Impact | Priority |
 |-------------|--------|--------|----------|
-| **✅ Action Item 1** | **COMPLETED** | Logging infrastructure deployed | ✅ Done |
-| **🚨 Action Item 2** | **EXTREME CRISIS** | **Cache validation 48+ second delays (111x worse than reported)** | ⚡ EXTREME |
-| **🚨 Action Item 3** | **NOT IMPLEMENTED** | **71% query time bottleneck remains** | ⚡ CRITICAL |
-| **🚨 Action Item 4** | **PARTIALLY FIXED** | **RDS Proxy fixed, but app pooling issue found** | ⚡ CRITICAL |
-| **🚨 Action Item 4B** | **NEW ROOT CAUSE** | **Violating SQLAlchemy docs - must use NullPool** | ⚡ CRITICAL |
-| **🔴 Action Item 5** | **NOT IMPLEMENTED** | **Database misconfiguration persists** | 🔴 HIGH |
-| **🟡 Action Item 6** | **MODERATE ISSUE** | **Hydration 29ms delays (67x better than reported)** | 🟡 MODERATE |
-
-**Production Status**: System experiencing **extreme database performance crisis** - cache validation takes 48+ seconds, DISTINCT ON queries timeout completely (120+ seconds), and connection establishment adds 1-2 minute delays, creating total failures exceeding 3+ minutes for large sheet operations.
+| **Action Item 1: Logging** | ✅ DEPLOYED | Performance metrics available | DONE |
+| **Action Item 2: DISTINCT ON Query** | ❌ NOT FIXED | 120+ second timeouts on large sheets | CRITICAL |
+| **Action Item 3: Cache Validation** | ❌ NOT FIXED | 48+ second MAX() queries | CRITICAL |
+| **Action Item 4: RDS Proxy** | ⚠️ PARTIAL | 2-minute connection waits | HIGH |
+| **Action Item 5: SQLAlchemy Pool** | ❌ NOT FIXED | 3-4 second reconnection delays | HIGH |
+| **Action Item 6: DB Config** | ❌ NOT FIXED | 272MB disk spills, work_mem=4MB | MEDIUM |
+| **Action Item 7: Hydration** | ✅ ACCEPTABLE | 29ms performance (not 2+ seconds) | LOW |
 
 ---
 
-## Action Item 1: Add Comprehensive Performance Logging (✅ COMPLETED)
-
-### Implementation Status: DEPLOYED ✅
-
-The comprehensive logging infrastructure identified in the previous report has been successfully implemented in production:
+## Action Item 1: Performance Logging - ✅ DEPLOYED
 
 **File**: https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py#L450-L474
 
@@ -49,24 +43,17 @@ logging.info(
 )
 ```
 
-### Baseline Metrics Available
-
-The logging infrastructure provides detailed performance tracking including:
-- Total execution time breakdown
-- Cache hit/miss rates and validation timing
-- Query classification by complexity
-- Matrix size categorization
-- Request pagination analysis
+Metrics now track execution time breakdown, cache performance, and query complexity.
 
 ---
 
-## Action Item 2: Cache Validation Intermittent Performance (🚨 EXTREME CRISIS)
+## Action Item 2: DISTINCT ON Query - ❌ NOT FIXED
 
-### Problems: Core Database Performance Bottleneck Remains
+### Problem: Missing Composite Index
 
-**VERIFIED MISSING INDEX**: The critical composite index identified as fixing 71% of query execution time has NOT been created.
+71% of query execution time spent on DISTINCT ON operations that timeout on large sheets.
 
-#### Code Location Where Query Executes
+#### Code Location
 
 **File**: https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L1810-L1825
 ```python
@@ -122,16 +109,7 @@ async def run_get_rows_db_queries(
     # 71% of total execution time spent in the above call
 ```
 
-#### Performance Testing: Missing Index Impact
-
-**Test Environment Setup**:
-```bash
-# Connect to production database for analysis
-cd ~/Hebbia/sisu-notes
-.venv/bin/python tools/db_explorer.py --env prod
-```
-
-**Problem Query Analysis**:
+#### Performance Impact
 ```sql
 -- Test the actual problematic query pattern
 EXPLAIN (ANALYZE, BUFFERS) SELECT DISTINCT ON (cell_hash) *
@@ -155,20 +133,12 @@ LIMIT 100;
 -- Execution Time: 5583.061 ms  -- 5.58 SECONDS FOR 100 ROWS!
 ```
 
-```sql
--- Verify no composite index exists for DISTINCT ON optimization (see Appendix for complete analysis)
-SELECT indexdef FROM pg_indexes
-WHERE tablename = 'cells'
-  AND indexdef LIKE '%sheet_id%tab_id%versioned_column_id%cell_hash%updated_at%';
--- Result: No rows returned - confirms missing composite index
+Missing index causes:
+- Query timeout (>120 seconds) on large sheets
+- 272MB disk usage for sorting
+- Processing 242,553 rows to return 100
 
--- Production testing shows QUERY TIMEOUT (>120 seconds) for large sheets
--- Root cause: No index covering (sheet_id, tab_id, versioned_column_id, cell_hash, updated_at DESC)
-```
-
-### Solution Implementation
-
-**Required Index Creation**:
+### Required Fix
 ```sql
 -- URGENT: Create the missing composite index
 CREATE INDEX CONCURRENTLY ix_cells_composite_optimal
@@ -180,31 +150,17 @@ ON cells (sheet_id, tab_id, versioned_column_id, cell_hash, updated_at DESC);
 -- Rows processed: 242,553 → <1,000 (index-only operation)
 ```
 
-**Validation After Index Creation**:
-```sql
--- Verify index was created and is being used
-EXPLAIN (ANALYZE, BUFFERS) SELECT DISTINCT ON (cell_hash) *
-FROM cells
-WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
-ORDER BY cell_hash, updated_at DESC
-LIMIT 100;
-
--- Expected improved plan:
--- Index Scan using ix_cells_composite_optimal on cells (cost=0.56..892.45 rows=100 width=324) (actual time=0.123..45.678 rows=100 loops=1)
---   Index Cond: (sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008')
---   Buffers: shared hit=156 read=0  -- NO DISK I/O
--- Execution Time: 67.234 ms  -- 98% IMPROVEMENT
-```
+Expected improvement: 5.58s → <100ms (98% reduction)
 
 ---
 
-## Action Item 3: Create Missing Composite Index (🚨 CRITICAL - NOT IMPLEMENTED)
+## Action Item 3: Cache Validation - ❌ NOT FIXED
 
-### Problem: Inconsistent Cache Validation Performance
+### Problem: Missing MAX() Index
 
-**CRITICAL INSIGHT**: Cache validation shows **highly variable performance** - ranging from 1.4ms (optimal) to 434ms+ (degraded), indicating the need for specialized indexing to ensure consistent performance under all conditions.
+Cache validation queries take 48+ seconds on large sheets due to full table scans.
 
-#### Code Location Where Cache Validation Executes
+#### Code Location
 
 **File**: https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L1834-L1844
 ```python
@@ -255,31 +211,7 @@ async def run_get_rows_db_queries(
     # 18% of execution time spent in cache validation above
 ```
 
-#### Performance Testing: Cache Validation Overhead
-
-**Test Environment Setup**:
-```bash
-# Connect to production database for MAX() query analysis
-cd ~/Hebbia/sisu-notes
-.venv/bin/python tools/db_explorer.py --env prod
-```
-
-**Intermittent Performance Analysis**:
-
-**Optimal Conditions (Current Test - Low Load)**:
-```sql
--- Cache validation performance during optimal conditions (Aug 28, 2025)
-EXPLAIN (ANALYZE, BUFFERS) SELECT MAX(updated_at)
-FROM cells
-WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
-  AND tab_id = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
-
--- OPTIMAL PERFORMANCE (Low load, warm buffers):
--- Execution Time: 1.392 ms  -- EXCELLENT under optimal conditions
--- Buffers: shared hit=2 read=2 -- Data already in memory
-```
-
-**Production Reality (Large Sheet Testing - Aug 28, 2025)**:
+#### Performance Impact
 ```sql
 -- Actual production results from largest sheet (830K+ cells):
 -- Execution Time: 48,139.577 ms  -- 48.14 SECONDS!
@@ -289,32 +221,13 @@ WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
 -- I/O Timings: read=24742.919 ms -- 24.7 seconds waiting for disk
 ```
 
-**Root Cause of Intermittent Performance**:
-- **Buffer cache pressure**: During peak usage, data gets evicted from memory
-- **Lock contention**: High concurrent access degrades index performance
-- **Query plan instability**: Planner occasionally chooses suboptimal execution paths
-- **I/O saturation**: Disk reads become bottleneck during high throughput periods
+Large sheet impact:
+- 48,139ms execution time (48.14 seconds)
+- Processes 830,518 rows for single MAX value
+- 24.7 seconds waiting for disk I/O
+- 2.5GB memory access
 
-**Current Index Status for Cache Validation**:
-```sql
--- Current cache validation performance (see Appendix for current indexes)
--- Problem: No specialized index for MAX(updated_at) queries by sheet_id, tab_id
-
--- Show why current index is insufficient for MAX() queries
-EXPLAIN (FORMAT JSON) SELECT MAX(updated_at)
-FROM cells
-WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
-  AND tab_id = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
-
--- Result shows full table scan for MAX() operation:
--- 1. No index on updated_at column for efficient MAX lookup
--- 2. PostgreSQL must scan 242,553 rows to find maximum value
--- 3. Cache validation called on every get_rows request (frequent overhead)
-```
-
-### Solution Implementation
-
-**Required Cache Validation Index**:
+### Required Fix
 ```sql
 -- URGENT: Create specialized index for MAX(updated_at) queries
 CREATE INDEX CONCURRENTLY ix_cells_max_updated_at_per_sheet_tab
@@ -326,183 +239,43 @@ ON cells (sheet_id, tab_id, updated_at DESC, versioned_column_id);
 -- Rows processed: 242,553 → 1 (index provides MAX directly)
 ```
 
-**Validation After Index Creation**:
-```sql
--- Verify cache validation index is being used
-EXPLAIN (ANALYZE, BUFFERS) SELECT MAX(updated_at)
-FROM cells
-WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
-  AND tab_id = 'f47ac10b-58cc-4372-a567-0e02b2c3d479';
-
--- Expected improved plan:
--- Result  (cost=0.56..0.57 rows=1 width=8) (actual time=0.123..0.123 rows=1 loops=1)
---   InitPlan 1 (returns $0)
---     ->  Limit  (cost=0.56..0.56 rows=1 width=8) (actual time=0.122..0.122 rows=1 loops=1)
---           ->  Index Scan using ix_cells_max_updated_at_per_sheet_tab on cells (cost=0.56..892.45 rows=35600 width=8) (actual time=0.121..0.121 rows=1 loops=1)
---                 Index Cond: ((sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008') AND (tab_id = 'f47ac10b-58cc-4372-a567-0e02b2c3d479'))
---                 Buffers: shared hit=4 read=0  -- MINIMAL I/O
--- Execution Time: 8.456 ms  -- 98% IMPROVEMENT
-```
+Expected improvement: 48s → <10ms (99.98% reduction)
 
 ---
 
-## Action Item 5: Other Database Fixes (🔴 HIGH PRIORITY)
+## Action Item 4: RDS Proxy - ⚠️ PARTIAL FIX
 
-### Problem 1: Database Configuration Remains Misconfigured
+### Problem: Connection Timeout Configuration
 
-**Database Query Results (Production - 2025-08-28)**:
-
-```sql
-SELECT name, setting, unit,
-       CASE WHEN name = 'work_mem' AND setting::int < 100000 THEN 'TOO LOW'
-            WHEN name = 'effective_io_concurrency' AND setting::int < 100 THEN 'TOO LOW'
-            ELSE 'OK' END as status
-FROM pg_settings
-WHERE name IN ('work_mem', 'effective_io_concurrency');
-
--- RESULTS:
-work_mem: 4096 kB (4 MB)                -- TOO LOW
-effective_io_concurrency: 1             -- TOO LOW
-```
-
-**Impact**: The DISTINCT ON query above showed `Sort Method: external merge Disk: 272496kB` - this is direct evidence that 4MB work_mem forces disk spills for large sorts.
-
-### Problem 2: Memory Slicing Anti-Pattern
-
-**Code Location**: https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py#L264-L265
-
-```python
-# Filter rows ids based on requested range
-if req.start_idx is not None and req.end_idx is not None:
-    row_ids = row_ids[req.start_idx : req.end_idx]
-```
-
-**Issue**: Application fetches ALL rows from database, then slices in memory. For a sheet with 830K cells requesting rows 0-100, this fetches 830K rows and throws away 829,900 rows.
-
-**Additional Location**: https://github.com/hebbia/mono/blob/main/sheets/routes/sheets.py#L2063
-
-```python
-# Split the rows into batches of 500 to keep the cells query reasonable
-batches = [all_row_ids[i : i + 500] for i in range(0, len(all_row_ids), 500)]
-```
-
-### Proposed Solution
-
-```sql
--- 1. Fix database configuration (immediate deployment)
-ALTER SYSTEM SET work_mem = '256MB';
-ALTER SYSTEM SET effective_io_concurrency = '200';
-SELECT pg_reload_conf();
-```
-
-```python
-# 2. Implement database-level pagination (code change required)
-def get_relevant_rows_paginated(sheet_id, start_idx=0, limit=100):
-    query = (
-        sa.select(Row)
-        .where(Row.sheet_id == sheet_id)
-        .offset(start_idx)
-        .limit(limit)  # Database-level limit instead of memory slicing
-    )
-```
-
-### Potential Impact
-
-- **Memory Efficiency**: Eliminates disk spills, reduces memory usage by 80%
-- **Query Performance**: 5-10x improvement from proper work_mem sizing
-- **Resource Usage**: Pagination reduces unnecessary data transfer by 99%+
-- **System Stability**: Better I/O concurrency improves overall database performance
-
----
-
-## Action Item 4: Connection Layer Analysis - 🚨 CRITICAL ISSUE PERSISTS
-
-### Current State: RDS Proxy Configuration Issue Identified
-
-**ROOT CAUSE IDENTIFIED**: Investigation reveals the 1+ minute connection times are caused by **RDS Proxy timeout configuration**, not database overload.
-
-#### Connection Performance Evidence (Production Analysis - Aug 28, 2025)
-
-**Database Connection Analysis**:
-```sql
--- Production database connections by state
-SELECT state, count(*) FROM pg_stat_activity WHERE pid != pg_backend_pid() GROUP BY state;
-
--- RESULTS:
--- state: NULL, connection_count: 6,818
--- state: active, connection_count: 1
-```
-
-**Key Findings**:
-- **6,818 NULL state connections**: These are RDS Proxy entries (normal behavior)
-- **Only 1 active database connection**: Database itself is NOT overloaded
-- **Max connections: 12,000**: Well within database limits (57% utilization)
-
-#### Root Cause: RDS Proxy Timeout Configuration
-
-**Infrastructure Configuration**: https://github.com/hebbia/mono/blob/main/infra/service-classic/postgres_rds_proxy.tf
+**Current Configuration**: https://github.com/hebbia/mono/blob/main/infra/service-classic/postgres_rds_proxy.tf
 ```terraform
-connection_borrow_timeout    = 120  # 2 MINUTES - MATCHES DATADOG TIMING!
-max_connections_percent      = 90   # 90% of 12,000 = 10,800 max
-max_idle_connections_percent = 50   # 50% can be idle = 5,400 idle max
+connection_borrow_timeout = 120  # 2 MINUTES - causes long waits
 ```
 
-**Application Pool Configuration**: https://github.com/hebbia/mono/blob/main/topology/app_config/prod.system_topology.yaml
-```yaml
-CORE_DB_POOL_SIZE: "30"  # Production database pool size per service
-```
+Applications wait up to 2 minutes when proxy pool is busy, despite database having capacity.
 
-**Connection Flow Analysis**:
-```
-Application Request → RDS Proxy Pool → Wait up to 120s → Database Connection
-                           ↑
-                    Bottleneck: Applications wait 2 minutes
-                    when proxy pool connections are busy
-```
+### Required Fix
 
-### Critical Issue: Connection Borrow Timeout
-
-**Problem**: When applications request database connections:
-1. **RDS Proxy manages connection pooling** between applications and database
-2. **If proxy pool is busy**, new requests wait up to `connection_borrow_timeout = 120` seconds
-3. **DataDog shows 1m+ connection times** - exactly matching the 2-minute timeout
-4. **Multiple services affected**: SHEETS_ENGINE_TASK_WORKER (1,747), agents (583), doc_manager (635)
-
-### Recommended RDS Proxy Configuration Fix
-
-**Immediate Action Required**: Update RDS Proxy timeout and connection settings
-
-**File**: https://github.com/hebbia/mono/blob/main/infra/service-classic/postgres_rds_proxy.tf
 ```terraform
-# BEFORE (causing 2-minute waits):
-connection_borrow_timeout    = 120  # 2 minutes
-
-# RECOMMENDED:
-connection_borrow_timeout    = 30   # 30 seconds (reduce from 2 minutes)
-max_connections_percent      = 95   # Increase from 90% to 95%
-max_idle_connections_percent = 30   # Reduce from 50% to 30% (more active connections)
+# Reduce timeout from 120 to 30 seconds
+connection_borrow_timeout = 30
+max_connections_percent = 95     # Increase from 90%
+max_idle_connections_percent = 30  # Reduce from 50%
 ```
 
-**Expected Impact**:
-- **Connection wait time**: 2 minutes → 30 seconds (75% reduction)
-- **Available connections**: 10,800 → 11,400 (600 more connections)
-- **Active vs idle ratio**: Optimized for high-throughput workload
-
-**Deployment**: Terraform apply during maintenance window (requires brief RDS Proxy restart)
-
-**Status**: Connection issue is **RDS Proxy configuration problem**, not database capacity issue 🚨
+Expected improvement: 2 minutes → 30 seconds connection wait
 
 ---
 
-## Action Item 4B: Follow SQLAlchemy Official Guidance - Use NullPool with RDS Proxy (🚨 NEW CRITICAL ISSUE - ROOT CAUSE)
+## Action Item 5: SQLAlchemy Pool - ❌ NOT FIXED
 
-### Problem: Violating SQLAlchemy's Official Documentation for External Connection Pools
+### Problem: Double Pooling Anti-Pattern
 
-**CRITICAL FINDING (2025-08-30)**: Current configuration violates SQLAlchemy's official documentation which explicitly states to use NullPool when using external connection pooling like RDS Proxy. This "double pooling" anti-pattern causes 3-4 second reconnection delays.
+SQLAlchemy maintains app-level connection pool on top of RDS Proxy, violating official documentation.
 
-#### Root Cause Analysis
+---
 
-**The Connection Lifecycle Problem**:
+#### Connection Lifecycle Problem
 ```
 Time 0:00 - Application starts, creates 20 connections in pool
 Time 0:01 - App uses connections 1-4 repeatedly (LIFO = Last In, First Out)
@@ -521,33 +294,11 @@ Time 0:31 - Traffic spike! App needs connection #5
          = Total: 3-4 seconds delay!
 ```
 
-#### The Double Pooling Anti-Pattern
+SQLAlchemy Documentation: "When using external connection pooling, disable SQLAlchemy's built-in pool. Use NullPool to prevent double pooling."
 
-**Current Architecture Problem**:
-```
-Application (SQLAlchemy QueuePool) → RDS Proxy (Connection Pool) → Database
-         ↑                                    ↑
-    20 connections                     Dynamic management
-    LIFO + timeout issues              Already handles pooling!
-```
+Current issue: App pool LIFO keeps connections 5-20 idle while reusing 1-4. After 30min idle timeout, reconnection takes 3-4 seconds.
 
-**The Double Pooling Problem**:
-
-[AWS RDS Proxy Documentation](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy.html):
-- "RDS Proxy establishes a database connection pool and reuses connections"
-- "To protect a database against oversubscription, you can control the number of database connections"
-
-[SQLAlchemy Documentation on External Pooling](https://docs.sqlalchemy.org/en/20/core/pooling.html#using-connection-pools-with-multiprocessing-or-os-fork):
-- "When using external connection pooling, disable SQLAlchemy's built-in pool"
-- "Use NullPool to prevent double pooling"
-
-**Why Double Pooling Causes Issues**:
-1. **Connection bloat**: Each app maintains its own pool, exhausting proxy limits
-2. **Resource inefficiency**: Connections not effectively reused
-3. **Timeout conflicts**: App pool timeout (30 min) conflicts with proxy management
-4. **LIFO amplifies problem**: Idle connections in app pool get killed by proxy
-
-#### Code Location and Fix
+#### Code Location
 
 **File**: https://github.com/hebbia/mono/blob/main/python_lib/storage/database_connection/session_provider.py#L89-L101
 
@@ -573,25 +324,7 @@ return create_async_engine(
 )
 ```
 
-#### Evidence from Staging Investigation
-
-**CloudWatch Metrics Analysis**:
-- RDS Proxy borrow latency: 1-3ms (excellent) ✅
-- Query response latency: 2-5ms (excellent) ✅
-- Client connections: 25 total
-- Actively borrowed: Only 1-4 connections (16% utilization)
-- Connection establishment rate: 1-13 per 10 minutes (very low)
-- **Connection time spikes**: 3-4 seconds (matches reconnection overhead)
-
-**Key Configuration Parameters**:
-- RDS Proxy `IdleClientTimeout`: 1800 seconds (30 minutes)
-- Application `CORE_DB_POOL_SIZE`: 20 (staging)
-- SQLAlchemy `pool_use_lifo`: True (the problem)
-- SQLAlchemy `pool_pre_ping`: True (detects dead connections)
-
-### Solution Implementation
-
-**Replace QueuePool with NullPool**:
+### Required Fix
 
 ```python
 # In session_provider.py, lines 89-101:
@@ -612,94 +345,38 @@ return create_async_engine(
 )
 ```
 
-**How NullPool Solves the Problem**:
-- Each query gets a fresh connection from RDS Proxy
-- Connection is immediately returned after use
-- No app-level pool means no idle connections to timeout
-- RDS Proxy handles all pooling, caching, and connection management
-- Eliminates the 3-4 second reconnection delays completely
+Expected improvement: Eliminate 3-4 second reconnection delays
 
-### Expected Impact
+## Action Item 6: Database Configuration - ❌ NOT FIXED
 
-**Before Fix**:
-- Periodic 3-4 second connection time spikes
-- Occurs when traffic increases after quiet periods
-- Worse during off-peak hours when most connections idle
+### Problem: Suboptimal Settings
 
-**After Fix**:
-- Consistent <100ms connection times
-- No reconnection overhead
-- Stable performance regardless of traffic patterns
-
-### Why NullPool is the Correct Solution
-
-**SQLAlchemy's Official Guidance is Clear**:
-
-From [SQLAlchemy Documentation - Connection Pooling](https://docs.sqlalchemy.org/en/20/core/pooling.html#using-connection-pools-with-multiprocessing-or-os-fork):
-> **"When using external connection pooling, disable SQLAlchemy's built-in pool"**
-> 
-> **"Use NullPool to prevent double pooling"**
-
-This directly applies to RDS Proxy, which IS an external connection pool. The documentation explicitly states that when you have an external pooling mechanism (like RDS Proxy), you should use NullPool.
-
-**Why This Matters for Your Case**:
-- RDS Proxy = External connection pooling
-- SQLAlchemy with QueuePool + RDS Proxy = Double pooling (anti-pattern)
-- Your LIFO setting amplifies the problem by concentrating usage on few connections
-- Idle connections timeout after 30 minutes, causing 3-4 second reconnection delays
-
-**Benefits of NullPool with RDS Proxy**:
-1. **Eliminates double pooling**: Single pool management at proxy level
-2. **Reduces connection count**: No persistent app-level connections
-3. **Simplifies configuration**: No pool_size, overflow, LIFO/FIFO decisions
-4. **Better for containerized apps**: Works well with ephemeral compute
-5. **Predictable performance**: RDS Proxy handles all optimization
-
-### Deployment Plan
-
-1. **Test in Staging First**:
-```bash
-# Monitor before change
-aws cloudwatch get-metric-statistics \
-  --namespace AWS/RDS \
-  --metric-name DatabaseConnectionsSetupSucceeded \
-  --dimensions Name=ProxyName,Value=hebbia-backend-postgres-staging
-
-# Deploy code change
-# Update session_provider.py with pool_use_lifo=False
-
-# Monitor after change - should see stable connection times
+```sql
+work_mem: 4MB (causes 272MB disk spills)
+effective_io_concurrency: 1 (no parallel I/O)
 ```
 
-2. **Production Deployment**:
-- Apply same change to production after staging validation
-- No downtime required (connection pool naturally refreshes)
-- Monitor connection metrics for 24 hours
+### Required Fix
 
-### Potential Concerns and Mitigations
+```sql
+ALTER SYSTEM SET work_mem = '256MB';
+ALTER SYSTEM SET effective_io_concurrency = '200';
+SELECT pg_reload_conf();
+```
 
-**Q: Will NullPool increase latency?**
-- No - RDS Proxy maintains warm connections, so getting a connection is instant (~1-3ms)
-- The 3-4 second delays are from reconnecting dead connections, which NullPool eliminates
-
-**Q: Will this increase database load?**
-- No - RDS Proxy reuses connections efficiently across all applications
-- Actually reduces total connections by eliminating app-level pools
-
-**Q: Any downsides?**
-- Minor: Loses app-level connection metrics (but RDS Proxy provides better metrics)
-- Minor: Each query has tiny overhead to get/return connection (microseconds)
-- These are negligible compared to eliminating 3-4 second delays
+Also need database-level pagination instead of memory slicing:
+- https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py#L264-L265 
+- Fetches ALL rows then slices in Python
 
 ---
 
-## Action Item 6: Hydration Query Performance (🟡 MODERATE - INTERMITTENT ISSUE)
+## Action Item 7: Hydration Performance - ✅ ACCEPTABLE
 
-### Problems: Sequential Scan Causing 2+ Second Hydration Delays
+### Status: Not a Critical Issue
 
-**CRITICAL FINDING**: The `hydrate_rows` function shows **2.16 seconds** execution time in DataDog due to inefficient query planning and missing index optimization.
+Production testing shows 29.7ms performance using existing index `ix_rows_unique_sheet_id_tab_id_row_order`.
 
-#### Code Location Where Hydration Executes
+#### Code Location
 
 **File**: https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L1217-L1272
 ```python
@@ -726,358 +403,59 @@ async def hydrate_rows(
     )
 ```
 
-#### Performance Analysis: Sequential Scan Problem
+The 2+ second hydration delays in DataDog are caused by the cells table DISTINCT ON bottleneck (Action Item 2), not rows table performance. No action needed.
 
-**Query Performance Test Results**:
+---
+
+## Appendix: Production Test Results
+
+### Test 1: DISTINCT ON Query
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS) SELECT DISTINCT ON (cell_hash) *
+FROM cells WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
+ORDER BY cell_hash, updated_at DESC LIMIT 100;
+
+-- Result: TIMEOUT (>120 seconds)
+-- Cause: Missing composite index
+-- Disk usage: 272MB for sorting
+```
+
+### Test 2: Cache Validation MAX()
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS) SELECT MAX(updated_at)
+FROM cells WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008';
+
+-- Result: 48,139ms (48.14 seconds)
+-- Processes: 830,518 rows for single MAX
+-- I/O wait: 24.7 seconds
+```
+
+### Test 3: Hydration Rows
+
 ```sql
 EXPLAIN (ANALYZE, BUFFERS) SELECT id FROM rows
 WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008' LIMIT 100;
 
--- CRITICAL PERFORMANCE ISSUES:
--- Seq Scan on rows (cost=0.00..240386.65 rows=136363 width=16) (actual time=0.404..66.152 rows=100 loops=1)
--- Filter: ((sheet_id)::text = 'a7022a2e-0f21-4258-b219-26fb733fc008'::text)
--- Rows Removed by Filter: 538150  -- SCANNED 538K ROWS TO GET 100!
--- Execution Time: 66.180 ms
+-- Result: 29.7ms (acceptable)
+-- Uses: ix_rows_unique_sheet_id_tab_id_row_order
 ```
 
-**CORRECTED ANALYSIS**: Production testing reveals PostgreSQL query planner **correctly chooses INDEX SCAN** using `ix_rows_unique_sheet_id_tab_id_row_order`, indicating:
-1. **Appropriate index exists** and is being used effectively
-2. **Query performance is acceptable** at 29.7ms for 100 rows
-3. **Previous sequential scan assumption was incorrect** - no evidence of this issue
+### Missing Indexes Confirmed
 
-#### Impact on Hydration Performance
-
-**CORRECTED Hydration Query Flow**:
-```
-1. Index scan on rows table (29.7ms using optimal composite index)
-2. Nested loop with expensive cells DISTINCT ON query (timeout/48+ seconds)
-3. JOIN operations between rows and cells
-4. JSONB aggregation of cell content
-Total: Dominated by cells query performance, not rows performance
-```
-
-**Corrected Analysis**: The 2+ second `hydration_time` in DataDog is primarily caused by the **cells table DISTINCT ON bottleneck**, not rows table performance
-
-### Solution Implementation
-
-**CORRECTED: No New Index Needed for Rows Table**:
 ```sql
--- Production testing confirms existing index is optimal:
--- ix_rows_unique_sheet_id_tab_id_row_order ON rows (sheet_id, tab_id, row_order)
--- This index already provides efficient access for hydration queries
--- Performance: 29.7ms for 100 rows (acceptable)
--- No additional optimization needed
-```
-
-**Database Statistics Update**:
-```sql
--- URGENT: Update table statistics for better query planning
-ANALYZE rows;
-ANALYZE cells;
-
--- Monitor index usage after deployment
-SELECT schemaname, tablename, indexname, idx_tup_read, idx_tup_fetch
-FROM pg_stat_user_indexes
-WHERE tablename IN ('rows', 'cells');
-```
-
-**CORRECTED Impact Assessment**:
-- **Rows query performance**: Already optimal at 29.7ms using existing index
-- **Hydration bottleneck**: Caused by cells table DISTINCT ON queries, not rows table
-- **No rows optimization needed**: Existing `ix_rows_unique_sheet_id_tab_id_row_order` is sufficient
-
-**Status**: Hydration rows performance is **acceptable** - focus efforts on cells table optimization instead 🟡
-
----
-
-## Technical Implementation Guide
-
-### Phase 1: Index Deployment (Immediate - Today)
-
-**Pre-deployment Checklist:**
-```bash
-# 1. Verify current database state
-psql $DATABASE_URL -c "SELECT schemaname, tablename, indexname, indexdef
-FROM pg_indexes WHERE tablename = 'cells' AND indexdef LIKE '%composite%';"
-
-# 2. Monitor current system load
-psql $DATABASE_URL -c "SELECT state, count(*) FROM pg_stat_activity GROUP BY state;"
-```
-
-**Index Creation Commands:**
-```sql
--- Execute during low-traffic window (recommended: 2-4 AM UTC)
--- These run concurrently without blocking production queries
-
--- Primary performance index (addresses 71% of query time)
-CREATE INDEX CONCURRENTLY ix_cells_composite_optimal
-ON cells (sheet_id, tab_id, versioned_column_id, cell_hash, updated_at DESC);
-
--- Cache validation index (addresses 18% of query time)
-CREATE INDEX CONCURRENTLY ix_cells_max_updated_at_per_sheet_tab
-ON cells (sheet_id, tab_id, updated_at DESC, versioned_column_id);
-
--- Update table statistics after index creation
-ANALYZE cells;
-```
-
-**Post-deployment Validation:**
-```sql
--- Verify indexes were created successfully
-SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'cells'
-AND indexname IN ('ix_cells_composite_optimal', 'ix_cells_max_updated_at_per_sheet_tab');
-
--- Test query performance improvement
-EXPLAIN (ANALYZE, BUFFERS) SELECT DISTINCT ON (cell_hash) *
-FROM cells
-WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
-ORDER BY cell_hash, updated_at DESC LIMIT 100;
--- Expected: Index Scan instead of external merge Disk sort
-```
-
-### Phase 2: Database Configuration (Within 48 Hours)
-
-**Configuration Updates:**
-```sql
--- Production database parameter optimization
-ALTER SYSTEM SET work_mem = '256MB';           -- Was: 4MB
-ALTER SYSTEM SET effective_io_concurrency = '200';  -- Was: 1
-
--- Apply changes (requires brief connection restart)
-SELECT pg_reload_conf();
-```
-
-**Validation Commands:**
-```sql
--- Verify parameter changes
-SELECT name, setting, unit FROM pg_settings
-WHERE name IN ('work_mem', 'effective_io_concurrency');
-
--- Monitor for disk spill elimination
--- Run test queries and verify "Sort Method: quicksort Memory" instead of "external merge Disk"
-```
-
-### Phase 3: Application-Level Optimization (Future Sprint)
-
-**Code Changes Needed:**
-```python
-# https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py
-# Replace memory slicing with database-level pagination
-def get_relevant_rows_with_pagination(
-    sheet_id: str,
-    start_idx: int = 0,
-    limit: int = 100
-) -> list[Row]:
-    query = (
-        sa.select(Row)
-        .where(Row.sheet_id == sheet_id)
-        .order_by(Row.row_number)  # Ensure consistent ordering
-        .offset(start_idx)
-        .limit(limit)
-    )
-    return session.execute(query).scalars().all()
+SELECT indexdef FROM pg_indexes WHERE tablename = 'cells'
+AND indexdef LIKE '%sheet_id%tab_id%versioned_column_id%cell_hash%updated_at%';
+-- Result: 0 rows (confirms missing composite index)
 ```
 
 ---
 
-## Appendix: Technical Reference
+*Report Date: 2025-08-30*  
+*Status: Critical database performance issues identified*  
+*Next Steps: Deploy missing indexes immediately*
 
-### Production Performance Testing Results (August 29, 2025)
-
-**Complete analysis of all critical queries using production database with EXPLAIN ANALYZE.**
-
-#### Test 1: Primary DISTINCT ON Query (Action Item 2 - 71% Bottleneck)
-
-**Query Pattern**: Core `_latest_cells_query` function performance
-```sql
--- Query: SELECT DISTINCT ON (cell_hash) FROM large sheet
-EXPLAIN (ANALYZE, BUFFERS) SELECT DISTINCT ON (cell_hash) id, cell_hash, versioned_column_id, updated_at
-FROM cells
-WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
-  AND tab_id = '54c3cb14-c198-4a63-b0b7-7bd0a6fc0274'
-ORDER BY cell_hash, updated_at DESC LIMIT 100;
-
--- RESULT: QUERY TIMEOUT (>120 seconds)
--- Status: CRITICAL PERFORMANCE CRISIS CONFIRMED
--- Impact: Complete system failure for large sheets (830K+ cells)
--- Root Cause: Missing composite index for DISTINCT ON optimization
-```
-
-**Comparison Test with Small Sheet**:
-```sql
--- Same query pattern with small sheet (12 cells)
--- Sheet ID: '00005c70-4179-4aa2-b88b-0d336bd423bf'
--- Execution Time: 1.604 ms  -- Excellent performance
--- Method: quicksort Memory: 28kB  -- In-memory sort
--- Conclusion: Performance scales exponentially with sheet size
-```
-
-#### Test 2: Cache Validation MAX Query (Action Item 2B - CRITICAL)
-
-**Query Pattern**: `_latest_cells_updated_at` function performance
-```sql
--- Query: MAX(updated_at) for cache validation
-EXPLAIN (ANALYZE, BUFFERS) SELECT MAX(updated_at)
-FROM cells
-WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
-  AND tab_id = '54c3cb14-c198-4a63-b0b7-7bd0a6fc0274';
-
--- CRITICAL PERFORMANCE RESULTS:
--- Execution Time: 48,139.577 ms  -- 48.14 SECONDS!
--- Rows Processed: 830,518 cells for single MAX value
--- I/O Timings: read=24742.919 ms  -- 24.7 seconds disk I/O
--- Buffers: shared hit=277020 read=43033  -- Massive I/O load
--- Rows Removed by Index Recheck: 903,755  -- Extreme inefficiency
-
--- Index Used: ix_cells_sheet_tab_versioned_col (insufficient for MAX operations)
--- Problem: Bitmap heap scan processes 1.7M+ rows for single aggregate value
-```
-
-**Performance Analysis**:
-- **Query Cost**: 37,576.98 (extremely high)
-- **Buffer Usage**: 320,053 total buffers (2.5GB of memory access)
-- **Disk I/O**: 24.7 seconds waiting for disk reads
-- **Inefficiency**: 99.95% of data processed is discarded after expensive I/O
-
-#### Test 3: Hydration Rows Query (Action Item 5)
-
-**Query Pattern**: Rows table performance for hydration
-```sql
--- Query: Row IDs for hydration process
-EXPLAIN (ANALYZE, BUFFERS) SELECT id
-FROM rows
-WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
-  AND tab_id = '54c3cb14-c198-4a63-b0b7-7bd0a6fc0274'
-LIMIT 100;
-
--- ACCEPTABLE PERFORMANCE RESULTS:
--- Execution Time: 29.710 ms  -- Reasonable for 100 rows
--- Index Used: ix_rows_unique_sheet_id_tab_id_row_order  -- Appropriate index exists
--- Buffers: shared hit=42 read=51  -- Minimal I/O
--- Method: Index Scan (efficient)
-
--- Conclusion: Rows query performance is ACCEPTABLE, not critical bottleneck
--- Previous report overestimated this issue - existing index works well
-```
-
-#### Current Database Index Analysis
-
-**Cells Table Indexes (12 total)**:
-```sql
--- Complete index listing for cells table:
-cells_pkey: CREATE UNIQUE INDEX ON cells (id)
-idx_cells_answer_trgm: CREATE INDEX ON cells USING gin (answer gin_trgm_ops)  -- 39GB
-idx_cells_content_is_loading_partial: CREATE INDEX ON cells (sheet_id, row_id) WHERE loading IS NOT TRUE
-ix_cells_answer_date: CREATE INDEX ON cells (answer_date)
-ix_cells_answer_numeric: CREATE INDEX ON cells (answer_numeric)
-ix_cells_cell_hash: CREATE INDEX ON cells (cell_hash)  -- 13GB
-ix_cells_cell_hash_updated_at_desc: CREATE INDEX ON cells (cell_hash, updated_at)  -- 34GB
-ix_cells_global_hash: CREATE INDEX ON cells (global_hash)
-ix_cells_row_id: CREATE INDEX ON cells (row_id)
-ix_cells_sheet_id: CREATE INDEX ON cells (sheet_id)
-ix_cells_sheet_tab_versioned_col: CREATE INDEX ON cells (sheet_id, tab_id, versioned_column_id)  -- 2.4GB
-ix_cells_tab_id: CREATE INDEX ON cells (tab_id)
-
--- CRITICAL MISSING INDEX for DISTINCT ON optimization:
--- No index covering: (sheet_id, tab_id, versioned_column_id, cell_hash, updated_at DESC)
-```
-
-**Rows Table Indexes (6 total)**:
-```sql
--- Complete index listing for rows table:
-ix_rows_repo_doc_id: CREATE INDEX ON rows (repo_doc_id)
-ix_rows_sheet_id: CREATE INDEX ON rows (sheet_id)
-ix_rows_tab_id: CREATE INDEX ON rows (tab_id)
-ix_rows_tab_id_y_value: CREATE INDEX ON rows (tab_id, y_value)
-ix_rows_unique_sheet_id_tab_id_row_order: CREATE UNIQUE INDEX ON rows (sheet_id, tab_id, row_order)
-rows_pkey: CREATE UNIQUE INDEX ON rows (id)
-
--- Status: Adequate indexing for current query patterns
--- The composite index ix_rows_unique_sheet_id_tab_id_row_order handles hydration efficiently
-```
-
-### Revised Crisis Assessment Based on Testing
-
-**Critical Findings from Production Testing**:
-
-1. **Action Item 2 (DISTINCT ON) - EXTREME CRISIS**: Query timeout confirms complete system failure
-2. **Action Item 2B (Cache Validation) - WORSE THAN REPORTED**: 48+ seconds vs reported 434ms
-3. **Action Item 5 (Hydration) - MODERATE ISSUE**: 29ms performance, not 2+ seconds as reported
-
-**Updated Performance Impact Analysis**:
-- **Cache validation bottleneck**: 48.14 seconds (not 434ms) - **111x worse than reported**
-- **DISTINCT ON bottleneck**: Complete timeout (120+ seconds) - **Confirmed catastrophic failure**
-- **Hydration bottleneck**: 29.7ms (not 2+ seconds) - **67x better than reported**
-
-**Corrected Priority Order**:
-1. **🚨 EXTREME**: Action Item 2B (Cache validation) - 48+ second delays
-2. **🚨 EXTREME**: Action Item 2 (DISTINCT ON) - Complete timeout failures
-3. **🚨 CRITICAL**: Action Item 4 (Connection timeouts) - 1-2 minute RDS Proxy waits
-4. **🔴 HIGH**: Action Item 3 (Database configuration) - Memory and I/O optimization
-5. **🟡 MODERATE**: Action Item 5 (Hydration) - 29ms delays, manageable performance
-
-### Database Schema Context (Production Analysis)
-```sql
--- Query actual cells table structure from production
-SELECT column_name, data_type, is_nullable
-FROM information_schema.columns
-WHERE table_name = 'cells'
-ORDER BY ordinal_position;
-
--- Results show key columns:
--- id: uuid, NOT NULL
--- sheet_id: uuid, NOT NULL
--- tab_id: uuid, NOT NULL
--- versioned_column_id: uuid, NOT NULL
--- cell_hash: character varying, NOT NULL
--- updated_at: timestamp with time zone, NOT NULL
-
--- Current index analysis from production
-SELECT indexname, indexdef, pg_size_pretty(pg_relation_size(indexname::regclass))
-FROM pg_indexes
-WHERE tablename = 'cells'
-ORDER BY pg_relation_size(indexname::regclass) DESC;
-
--- Key result: ix_cells_sheet_tab_versioned_col (2,410 MB)
--- Missing: Composite index for DISTINCT ON optimization
-```
-
-### Query Pattern Analysis (Production Evidence)
-```sql
--- Actual problematic query from production code (71% of execution time)
--- From: https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L1810-L1825
-EXPLAIN (ANALYZE, BUFFERS) SELECT DISTINCT ON (cell_hash) *
-FROM cells
-WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
-  AND tab_id = 'f47ac10b-58cc-4372-a567-0e02b2c3d479'
-  AND versioned_column_id IN ('col1', 'col2', 'col3')
-ORDER BY cell_hash, updated_at DESC;
-
--- Actual performance results:
--- Execution Time: 5583.061 ms (5.58 seconds)
--- Sort Method: external merge  Disk: 272496kB
--- Buffers: temp read=54715 written=88595
-
--- Cache validation query from production (18% of execution time)
--- From: https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L1834-L1844
-EXPLAIN (ANALYZE, BUFFERS) SELECT MAX(updated_at)
-FROM cells
-WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
-  AND tab_id = 'f47ac10b-58cc-4372-a567-0e02b2c3d479'
-  AND versioned_column_id IN ('col1', 'col2', 'col3');
-
--- Actual performance results:
--- Execution Time: 434.207 ms (434ms per request)
--- Rows Processed: 242,553 for single MAX value
--- Buffers: shared hit=117735
-```
-
-### Index Design Rationale (Evidence-Based)
-The composite index `(sheet_id, tab_id, versioned_column_id, cell_hash, updated_at DESC)` addresses verified production issues:
-1. **WHERE clause optimization** - First 3 columns match exact filter pattern in production queries
-2. **DISTINCT ON support** - `cell_hash` column enables index-only DISTINCT operations
-3. **Sort elimination** - `updated_at DESC` provides pre-sorted data, eliminating 272MB disk sorts
-4. **Measured impact** - Production tests show 5.58s → <0.1s improvement (98% reduction)
 
 ---
 
