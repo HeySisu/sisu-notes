@@ -103,6 +103,43 @@ RequireTLS: true         # 2-3s TLS handshake for new connections
 - After 30 min, RDS Proxy kills idle connections
 - Traffic spikes require new connections → 2-3s TLS handshake → 4+ second delays
 
+### Validation Plan
+
+Add logging to confirm the hypothesis:
+
+```python
+# In session_provider.py, add connection lifecycle logging
+@event.listens_for(engine, "connect")
+def receive_connect(dbapi_conn, connection_record):
+    connection_record.info['connect_time'] = time.time()
+    logging.info("connection_opened", 
+                 pool_size=engine.pool.size(),
+                 checked_out=engine.pool.checked_out_connections())
+
+@event.listens_for(engine, "checkout")
+def receive_checkout(dbapi_conn, connection_record, connection_proxy):
+    age = time.time() - connection_record.info.get('connect_time', 0)
+    logging.info("connection_checkout",
+                 connection_age_seconds=age,
+                 was_idle=age > 1800)  # Flag if connection was idle > 30 min
+
+# Monitor for TLS handshake delays
+@event.listens_for(engine, "first_connect")
+def receive_first_connect(dbapi_conn, connection_record):
+    start = time.time()
+    # Connection establishment happens here
+    duration = time.time() - start
+    if duration > 2.0:
+        logging.warning("slow_connection_establishment",
+                       duration_seconds=duration,
+                       likely_cause="TLS_handshake")
+```
+
+Expected log patterns confirming the issue:
+1. Connections 1-5 repeatedly checked out (age < 30 min)
+2. Connections 6+ rarely used, age > 30 min when needed
+3. Slow connection establishment (>2s) correlating with idle connections
+
 ### Fix Options
 
 ```python
@@ -203,5 +240,18 @@ Direct: 1 (0.02%)
 
 ---
 
-*Report Date: 2025-08-30*  
-*Next Steps: Deploy missing indexes immediately (Action Items 2 & 3)*
+*Report Date: 2025-08-30*
+
+## Immediate Next Steps
+
+1. **Deploy missing indexes** (Action Items 2 & 3) - Critical for query performance
+2. **Add connection lifecycle logging** (Action Item 5) - Validate LIFO + idle timeout hypothesis
+3. **Monitor Datadog after logging deployment** - Correlate 4+ second spikes with connection age logs
+
+## Validation Metrics to Track
+
+After deploying the logging from Action Item 5:
+- Connection age distribution (how many connections > 30 min old)
+- Connection reuse patterns (which connection IDs used most frequently)
+- Correlation between slow connections (>2s) and idle connection replacement
+- Spike timing: Do 4+ second delays occur when connections 6+ are needed?
