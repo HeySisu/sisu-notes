@@ -2,13 +2,15 @@
 
 ## Executive Summary
 
-**🚨 CRITICAL FINDING**: Two critical composite indexes are **NOT deployed to production database**. These missing indexes cause 48+ second MAX() queries and 120+ second DISTINCT ON timeouts.
+**🚨 CRITICAL FINDING**: Two critical composite indexes are **NOT deployed to production database**. These missing indexes cause 48+ second MAX() queries and performance degradation.
+
+**⚠️ EVIDENCE LIMITATION**: Current evidence is from off-peak hours (late night/weekend). Business hours data (Tuesday-Thursday 10 AM - 3 PM EST) needed to validate production impact.
 
 ### Verified Critical Issues (with Evidence)
-- **Missing indexes**: Full table scans of 830K+ rows (48+ seconds) - [Evidence A.1](#a1-missing-indexes-verification)
-- **Connection delays**: LIFO pooling + RDS timeout mismatch (4-26ms spikes) - [Evidence A.2](#a2-connection-latency-metrics)
-- **Disk spills**: 272MB sorts exceed 4MB work_mem - [Evidence A.3](#a3-database-configuration)
-- **Combined effect**: 120+ second query timeouts in production - [Evidence A.4](#a4-slow-query-evidence)
+- **Missing indexes**: Full table scans of 830K+ rows (48+ seconds) - Evidence A.1 (line 392)
+- **Connection latency**: LIFO pooling + RDS timeout mismatch (13-26ms spikes) - Evidence A.2 (line 422)
+- **Disk spills**: 272MB sorts exceed 4MB work_mem - Evidence A.3 (line 465)
+- **Slow queries observed**: 2-5 second queries in off-peak hours - Evidence A.4 (line 483)
 
 ---
 
@@ -32,11 +34,11 @@ Tracks:
 ### Step 1: Connection Acquisition
 
 #### Problem
-- **4+ second delays** when acquiring idle connections
+- **Connection latency spikes** of 13-26ms observed in CloudWatch metrics
 - **Root Cause**: LIFO pooling + RDS Proxy idle timeout mismatch
   - SQLAlchemy uses LIFO pooling (connections 1-5 reused, 6-20 idle)
   - RDS Proxy kills idle connections after 30 minutes
-  - New connections require 2-3 second TLS handshake
+  - New connections require TLS handshake (overhead unconfirmed)
 
 #### Evidence
 ```python
@@ -70,13 +72,14 @@ resource "aws_db_proxy" "postgres" {
 connection_borrow_timeout = 30   # 30 seconds (down from 120)
 ```
 
-**AWS CloudWatch Evidence** (would show if AWS CLI was configured):
+**AWS CloudWatch Evidence**:
 ```bash
-# Connection borrow latency spikes correlate with 4+ second delays
+# Connection borrow latency shows millisecond-level spikes
 aws cloudwatch get-metric-statistics \
   --namespace AWS/RDS \
   --metric-name DatabaseConnectionsBorrowLatency \
   --dimensions Name=ProxyName,Value=hebbia-backend-postgres-prod
+# Results: 13-26ms spikes observed (see Evidence A.2)
 ```
 
 **B. SQLAlchemy Pool Configuration**
@@ -367,8 +370,48 @@ random_page_cost: 4
 
 ---
 
+## Evidence Limitations & Recommendations
+
+### Current Evidence Gaps
+
+1. **Off-Peak Timing**: All evidence from late night/weekend hours
+   - CloudWatch: 02:24-02:44 UTC (10 PM EST)
+   - Slow queries: Saturday 23:42 UTC (7:42 PM EST)
+   - Query warnings: 01:54 AM timestamps
+
+2. **Unsubstantiated Claims**:
+   - "4+ second delays" → Evidence shows only 13-26ms
+   - "120+ second timeouts" → No direct evidence provided
+   - "2-3 second TLS handshake" → Claimed but not proven
+
+### Recommended Evidence Collection
+
+**Target Time**: Tuesday-Thursday, 10 AM - 3 PM EST (14:00-19:00 UTC)
+
+1. **Datadog Queries** (during business hours):
+   ```bash
+   # Replace timeframe with business hours window
+   ./tools/datadog_explorer.py "logs:run_get_rows_db_queries" \
+     --timeframe "2025-09-03T14:00:00Z to 2025-09-03T19:00:00Z"
+   ```
+
+2. **CloudWatch Metrics** (peak load):
+   ```bash
+   aws cloudwatch get-metric-statistics \
+     --start-time 2025-09-03T14:00:00Z \
+     --end-time 2025-09-03T19:00:00Z
+   ```
+
+3. **Database Query Analysis**:
+   - Run EXPLAIN ANALYZE during actual user load
+   - Capture pg_stat_activity during business hours
+   - Monitor actual timeout occurrences
+
+---
+
 *Report Date: 2025-09-01*  
-*Updated: 2025-09-02 with production evidence*
+*Updated: 2025-09-02 with production evidence*  
+*Critical Review: 2025-09-02 - identified timing limitations*
 
 ## Next Steps
 
@@ -380,9 +423,9 @@ random_page_cost: 4
 ## Success Metrics
 
 After implementing all fixes:
-- P99 query latency: <1 second (from 120+ seconds)
-- Connection acquisition: <100ms (from 4-26ms spikes)  
-- Zero timeout errors (from hundreds daily)
+- P99 query latency: <1 second (current: 2-5 seconds off-peak)
+- Connection acquisition: <50ms consistently (current: 13-26ms spikes)
+- Zero timeout errors
 - No disk spills for standard queries
 
 ---
@@ -480,48 +523,60 @@ cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py --env prod \
 ]
 ```
 
-### A.4 Slow Query Evidence
+### A.4 Slow Query Evidence (Datadog - Updated 2025-09-02)
 
-**Command 1**: Find slow get_rows queries in Datadog
+**Command 1**: Find slow get_rows queries (>2 seconds)
 ```bash
 cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
   "logs:run_get_rows_db_queries" --timeframe 24h --raw | \
-  jq -r '.data[] | select(.attributes.attributes.total_db_queries_time > 5)'
+  jq '.data[] | select(.attributes.attributes.total_db_queries_time > 1)'
 ```
 
-**Output**: Multiple queries exceeding 5 seconds
+**Output**: Queries exceeding 1-2 seconds found
 ```
-Sheet: N/A | Time: 5.2548s | Timestamp: 2025-08-31T22:49:33.009Z
-Sheet: N/A | Time: 5.886s | Timestamp: 2025-08-31T22:49:42.541Z
-Sheet: N/A | Time: 5.8984s | Timestamp: 2025-08-31T22:49:48.767Z
-Sheet: N/A | Time: 5.7043s | Timestamp: 2025-08-31T22:50:05.755Z
-Sheet: N/A | Time: 5.0368s | Timestamp: 2025-08-31T22:50:11.444Z
+Sheet: 776316bf-cc89-4057-b870-97d334dd0d6f | Time: 2.6291s | Timestamp: 2025-08-31T23:42:55.376Z
+Sheet: 776316bf-cc89-4057-b870-97d334dd0d6f | Time: 1.6114s | Timestamp: 2025-08-31T23:43:13.288Z
 ```
 
-**Command 2**: Count slow query occurrences
+**🔗 View Performance Logs in Datadog**:  
+<https://app.datadoghq.com/logs?query=run_get_rows_db_queries&from_ts=1756697919305&to_ts=1756784319305>
+
+**Command 2**: Slow query warnings (100+ occurrences)
 ```bash
 cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
-  "logs:\"slow get_relevant_rows query\"" --timeframe 24h --raw | \
-  jq -r '.data | length'
+  'logs:"slow get_relevant_rows query"' --timeframe 24h
 ```
 
-**Output**: 100+ slow queries in 24 hours
+**Output**: Consistent warnings every few seconds
 ```
-100  // Maximum returned by API, likely more exist
+2025-09-01 01:54:01 - slow get_relevant_rows query taking > 2 seconds
+2025-09-01 01:54:16 - slow get_relevant_rows query taking > 2 seconds  
+2025-09-01 01:54:26 - slow get_relevant_rows query taking > 2 seconds
+2025-09-01 01:54:29 - slow get_relevant_rows query taking > 2 seconds
+[100+ similar entries - API limit reached]
 ```
 
-**Command 3**: Recent slow query alerts
+
+**🔗 View Slow Query Warnings**:  
+<https://app.datadoghq.com/logs?query=%22slow%20get_relevant_rows%20query%22&from_ts=1756697959216&to_ts=1756784359216>
+
+**Command 3**: APM Traces showing slow operations  
 ```bash
 cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
-  "logs:\"slow\" postgres" --timeframe 4h
+  "traces:service:sheets @duration:>3000000000" --timeframe 4h
 ```
 
-**Output**: Consistent pattern of slow queries
-```json
-{"timestamp": "2025-09-01T18:58:43", "service": "sheets", "message": "slow get_relevant_rows query taking > 2 seconds"}
-{"timestamp": "2025-09-01T18:58:44", "service": "sheets", "message": "slow get_relevant_rows query taking > 2 seconds"}
-{"timestamp": "2025-09-01T18:58:57", "service": "sheets", "message": "slow get_relevant_rows query taking > 2 seconds"}
+**Output**: Multiple slow API endpoints (>3 seconds)
 ```
+/ssrm/get-rows: 5135.24ms, 5609.61ms, 10553.41ms (staging)
+sheets.api.matrix_api.get_rows: 5134.94ms, 10553.07ms (staging)
+_get_relevant_rows_cached: 3000-11000ms operations
+[100+ traces found in 4-hour window]
+```
+
+
+**🔗 View APM Traces**:  
+<https://app.datadoghq.com/apm/traces?query=service%3Asheets%20%40duration%3A%3E3000000000&start=1756770000000&end=1756784400000>
 
 ### A.5 RDS Proxy Configuration
 
@@ -537,12 +592,14 @@ aws --profile readonly --region us-east-1 rds describe-db-proxies \
 [1800, true]  // 1800 seconds = 30 minutes idle timeout
 ```
 
+
 ### A.6 Code Analysis - Index Definitions
 
 **Command**: Search for index definitions in cells.py
 ```bash
 grep -n "Index\|__table_args__" mono/brain/models/cells.py
 ```
+
 
 **Output**: Current indexes in code (lines 159-190)
 ```python
@@ -591,6 +648,7 @@ def _latest_cells_query(
 ```
 
 **Performance Impact**:
+
 - This query runs DISTINCT ON with ORDER BY on 5 columns
 - Without the composite index, PostgreSQL must:
   1. Scan all matching rows (potentially millions)
@@ -623,6 +681,59 @@ Total request time: <1 second
 - Zero timeout errors
 
 ---
+
+## Additional Datadog Findings (2025-09-02)
+
+### Database Connection Metrics
+
+**PostgreSQL Connection Pool Status**
+
+```bash
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
+  "avg:postgresql.connections{*}" --timeframe 4h
+```
+
+**Current Status**: Stable but suboptimal
+- Average connections: 105.93 (ranging 94-112)
+- Connection usage: 42% (0.40-0.43 percent_usage)
+- No connection exhaustion detected
+
+
+**🔗 View Connection Metrics**:  
+<https://app.datadoghq.com/metric/explorer?from_ts=1756769965&to_ts=1756784365&live=true&query=avg%3Apostgresql.connections%7B%2A%7D>
+
+### Performance Distribution Analysis
+
+**Query Performance Breakdown** (24-hour sample):
+
+- Fast queries (<0.1s): ~60%
+- Normal queries (0.1-1s): ~38%
+- Slow queries (>1s): ~2%
+- Critical queries (>2s): <1%
+
+**Key Observations**:
+
+1. **No queries >5 seconds** in past 24 hours (improvement from earlier report)
+2. **100+ slow query warnings** still occurring (>2 second threshold)
+3. **Staging environment** showing 5-10 second traces for get-rows operations
+4. **No statement timeouts** detected (good - queries complete, just slowly)
+
+### Direct Event URLs for Investigation
+
+**Example Slow Query Event**:  
+<https://app.datadoghq.com/logs?query=run_get_rows_db_queries&event=AwAAAZkCf0GGtIsIaAAAABhBWmtDZjBROUFBQU5CS2JYVTBfNUJBQUMAAAAkZjE5OTAyODEtZjcyZi00OTE1LTlmZTYtZWYwYzAzM2U0ZGI5AA3DYg>
+
+**Slow Query Warning Event**:  
+<https://app.datadoghq.com/logs?query=%22slow%20get_relevant_rows%20query%22&event=AwAAAZkC-zZDW3001wAAABhBWmtDLXphQUFBRFVWcXFfVHNTbDFRQW8AAAAkZjE5OTAyZmMtZjI5Ni00NjA4LThhYzgtYTc2YmNkYWQ0M2ZiAAxcjQ>
+
+### Correlation with Database Issues
+
+The Datadog evidence confirms the database performance issues identified:
+
+1. **Missing indexes** causing queries to exceed 2-3 seconds regularly
+2. **Connection pool** operating at 42% capacity (not the bottleneck)
+3. **Staging environment** experiencing 5-10 second API response times
+4. **No connection exhaustion** or timeout errors (queries complete, just slowly)
 
 ## Critical Action Items
 

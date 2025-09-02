@@ -64,30 +64,108 @@ class DatadogExplorer:
             "DD-APPLICATION-KEY": self.app_key
         }
 
-    def parse_timeframe(self, timeframe: str) -> int:
-        """Convert timeframe string to seconds ago"""
+    def parse_timeframe(self, timeframe: str) -> tuple:
+        """Convert timeframe string to (from_time, to_time) tuple
+        
+        Supported formats:
+        - Relative: '1h', '2d', '30m' (time ago from now)
+        - Absolute: '2025-01-03' (single day)
+        - Range: '2025-01-03,2025-01-05' (from,to)
+        - ISO: '2025-01-03T10:00:00,2025-01-03T18:00:00'
+        - Unix: '1754539200,1754711999' (timestamps)
+        """
+        # Check for comma-separated range
+        if ',' in timeframe:
+            parts = timeframe.split(',')
+            if len(parts) == 2:
+                from_str, to_str = parts
+                
+                # Try to parse as Unix timestamps
+                try:
+                    from_ts = int(from_str)
+                    to_ts = int(to_str)
+                    # If values are in milliseconds (>10 digits), convert to seconds
+                    if from_ts > 9999999999:
+                        from_ts = from_ts // 1000
+                    if to_ts > 9999999999:
+                        to_ts = to_ts // 1000
+                    return (from_ts, to_ts)
+                except ValueError:
+                    pass
+                
+                # Try to parse as date strings
+                try:
+                    from_dt = self._parse_datetime(from_str)
+                    to_dt = self._parse_datetime(to_str)
+                    return (int(from_dt.timestamp()), int(to_dt.timestamp()))
+                except:
+                    print(f"⚠️ Invalid range format '{timeframe}', using default 1h")
+                    now = int(datetime.now().timestamp())
+                    return (now - 3600, now)
+        
+        # Check for single date (whole day)
+        if '-' in timeframe and not timeframe.startswith('-'):
+            try:
+                dt = self._parse_datetime(timeframe)
+                # Set to start of day
+                start_dt = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                # Set to end of day
+                end_dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+                return (int(start_dt.timestamp()), int(end_dt.timestamp()))
+            except:
+                pass
+        
+        # Original relative time parsing
         match = re.match(r'^(\d+)([mhd])$', timeframe)
-        if not match:
-            print(f"⚠️ Invalid timeframe '{timeframe}', using default 1h")
-            return 3600
+        if match:
+            value, unit = match.groups()
+            value = int(value)
+            
+            if unit == 'm':
+                seconds_ago = value * 60
+            elif unit == 'h':
+                seconds_ago = value * 3600
+            elif unit == 'd':
+                seconds_ago = value * 86400
+            else:
+                seconds_ago = 3600
+            
+            now = int(datetime.now().timestamp())
+            return (now - seconds_ago, now)
         
-        value, unit = match.groups()
-        value = int(value)
+        # Default to 1 hour
+        print(f"⚠️ Invalid timeframe '{timeframe}', using default 1h")
+        now = int(datetime.now().timestamp())
+        return (now - 3600, now)
+    
+    def _parse_datetime(self, dt_str: str) -> datetime:
+        """Parse various datetime formats"""
+        dt_str = dt_str.strip()
         
-        if unit == 'm':
-            return value * 60
-        elif unit == 'h':
-            return value * 3600
-        elif unit == 'd':
-            return value * 86400
-        else:
-            return 3600
+        # Try ISO format with timezone
+        if 'T' in dt_str:
+            try:
+                # Handle with timezone
+                if '+' in dt_str or dt_str.endswith('Z'):
+                    return datetime.fromisoformat(dt_str.replace('Z', '+00:00'))
+                else:
+                    # Assume local timezone
+                    return datetime.fromisoformat(dt_str)
+            except:
+                pass
+        
+        # Try common date formats
+        for fmt in ['%Y-%m-%d', '%Y/%m/%d', '%m-%d-%Y', '%m/%d/%Y']:
+            try:
+                return datetime.strptime(dt_str, fmt)
+            except:
+                continue
+        
+        raise ValueError(f"Could not parse datetime: {dt_str}")
 
     def query_metrics(self, query: str, timeframe: str = "1h"):
         """Query Datadog metrics"""
-        seconds_ago = self.parse_timeframe(timeframe)
-        to_time = int(datetime.now().timestamp())
-        from_time = to_time - seconds_ago
+        from_time, to_time = self.parse_timeframe(timeframe)
 
         params = {
             "from": from_time,
@@ -111,8 +189,7 @@ class DatadogExplorer:
 
     def list_metrics(self, search: str = None, timeframe: str = "1h"):
         """List available metrics"""
-        seconds_ago = self.parse_timeframe(timeframe)
-        from_time = int(datetime.now().timestamp()) - seconds_ago
+        from_time, to_time = self.parse_timeframe(timeframe)
 
         params = {"from": from_time}
         
@@ -149,9 +226,9 @@ class DatadogExplorer:
 
     def query_logs(self, query: str, timeframe: str = "1h", limit: int = 100):
         """Query Datadog logs"""
-        seconds_ago = self.parse_timeframe(timeframe)
-        to_time = datetime.now()
-        from_time = to_time - timedelta(seconds=seconds_ago)
+        from_ts, to_ts = self.parse_timeframe(timeframe)
+        from_time = datetime.fromtimestamp(from_ts)
+        to_time = datetime.fromtimestamp(to_ts)
         
         # Format times in RFC3339 format required by logs API
         from_str = from_time.strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -185,9 +262,9 @@ class DatadogExplorer:
 
     def query_traces(self, query: str, timeframe: str = "1h", limit: int = 100):
         """Query Datadog APM traces/spans"""
-        seconds_ago = self.parse_timeframe(timeframe)
-        to_time = datetime.now()
-        from_time = to_time - timedelta(seconds=seconds_ago)
+        from_ts, to_ts = self.parse_timeframe(timeframe)
+        from_time = datetime.fromtimestamp(from_ts)
+        to_time = datetime.fromtimestamp(to_ts)
         
         # Format times in RFC3339 format required by spans API
         from_str = from_time.strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -226,13 +303,11 @@ class DatadogExplorer:
 
     def generate_log_url(self, query: str, timeframe: str = "1h", event_id: str = None) -> str:
         """Generate Datadog Log Explorer URL, optionally for a specific event"""
-        seconds_ago = self.parse_timeframe(timeframe)
-        to_time = datetime.now()
-        from_time = to_time - timedelta(seconds=seconds_ago)
+        from_ts_sec, to_ts_sec = self.parse_timeframe(timeframe)
         
         # Convert to milliseconds timestamp
-        from_ts = int(from_time.timestamp() * 1000)
-        to_ts = int(to_time.timestamp() * 1000)
+        from_ts = int(from_ts_sec * 1000)
+        to_ts = int(to_ts_sec * 1000)
         
         # URL encode the query
         encoded_query = urllib.parse.quote(query)
@@ -254,13 +329,11 @@ class DatadogExplorer:
     
     def generate_trace_url(self, query: str, timeframe: str = "1h") -> str:
         """Generate Datadog APM Trace URL"""
-        seconds_ago = self.parse_timeframe(timeframe)
-        to_time = datetime.now()
-        from_time = to_time - timedelta(seconds=seconds_ago)
+        from_ts_sec, to_ts_sec = self.parse_timeframe(timeframe)
         
         # Convert to milliseconds timestamp
-        start_ms = int(from_time.timestamp() * 1000)
-        end_ms = int(to_time.timestamp() * 1000)
+        start_ms = int(from_ts_sec * 1000)
+        end_ms = int(to_ts_sec * 1000)
         
         # URL encode the query
         encoded_query = urllib.parse.quote(query)
@@ -271,13 +344,9 @@ class DatadogExplorer:
     
     def generate_metric_url(self, query: str, timeframe: str = "1h") -> str:
         """Generate Datadog Metrics Explorer URL"""
-        seconds_ago = self.parse_timeframe(timeframe)
-        to_time = datetime.now()
-        from_time = to_time - timedelta(seconds=seconds_ago)
+        from_ts, to_ts = self.parse_timeframe(timeframe)
         
-        # Convert to seconds timestamp
-        from_ts = int(from_time.timestamp())
-        to_ts = int(to_time.timestamp())
+        # Already in seconds timestamp format
         
         # URL encode the query
         encoded_query = urllib.parse.quote(query)
@@ -309,7 +378,7 @@ class DatadogExplorer:
 
         if query_type == "list":
             metrics = data.get('metrics', [])
-            print(f"\n📊 Found {data.get('count', 0)} metrics:")
+            print(f"→ {data.get('count', 0)} metrics found")
             for metric in metrics[:50]:  # Show first 50
                 print(f"  • {metric}")
             if len(metrics) > 50:
@@ -318,7 +387,7 @@ class DatadogExplorer:
         
         elif query_type == "traces":
             traces = data.get('data', [])
-            print(f"\n🔍 Found {len(traces)} trace spans:")
+            print(f"→ {len(traces)} trace spans found")
             
             for idx, trace in enumerate(traces[:20]):  # Show first 20 traces
                 attrs = trace.get('attributes', {})
@@ -346,19 +415,13 @@ class DatadogExplorer:
                 # Convert duration from nanoseconds to milliseconds
                 duration_ms = duration / 1_000_000 if duration else 0
                 
-                print(f"\n  Span {idx + 1}:")
-                print(f"    Time: {ts_str}")
-                print(f"    Service: {service}")
-                print(f"    Resource: {resource_name}")
-                print(f"    Duration: {duration_ms:.2f}ms")
+                print(f"\n  [{idx + 1}] {ts_str} | {service} | {resource_name} | {duration_ms:.2f}ms")
                 
-                # Show additional attributes if present
-                if env != 'unknown':
-                    print(f"    Environment: {env}")
+                # Show additional attributes if present (indented)
                 if db_statement:
-                    print(f"    DB Statement: {db_statement[:100]}...")  # Truncate long statements
+                    print(f"      DB: {db_statement[:80]}...")  # Truncate long statements
                 if error:
-                    print(f"    Error: {error}")
+                    print(f"      ERROR: {error}")
             
             if len(traces) > 20:
                 print(f"\n  ... and {len(traces) - 20} more trace spans")
@@ -367,7 +430,7 @@ class DatadogExplorer:
         
         elif query_type == "logs":
             logs = data.get('data', [])
-            print(f"\n📝 Found {len(logs)} log entries:")
+            print(f"→ {len(logs)} log entries found")
             
             for idx, log_entry in enumerate(logs[:20]):  # Show first 20 logs
                 attrs = log_entry.get('attributes', {})
@@ -392,35 +455,28 @@ class DatadogExplorer:
                 except:
                     ts_str = timestamp
                 
-                print(f"\n  Log {idx + 1}:")
-                print(f"    Time: {ts_str}")
-                print(f"    Service: {service}")
-                print(f"    Host: {host}")
-                print(f"    Status: {status}")
-                print(f"    Message: {message}")
+                # Truncate message if too long
+                msg_display = message[:100] + "..." if len(message) > 100 else message
+                status_icon = "❌" if status == "error" else "⚠️" if status == "warn" else ""
+                print(f"\n  [{idx + 1}] {ts_str} | {service} | {status_icon}{status}")
+                print(f"      {msg_display}")
                 
-                # If it's a performance log, show the metrics
+                # If it's a performance log, show the metrics inline
                 if 'run_get_rows_db_queries' in str(message) and nested_attrs:
+                    perf_parts = []
                     if 'total_db_queries_time' in nested_attrs:
-                        print(f"    DB Query Time: {nested_attrs.get('total_db_queries_time', 'N/A')}s")
-                    if 'hydration_time' in nested_attrs:
-                        print(f"    Hydration Time: {nested_attrs.get('hydration_time', 'N/A')}s")
+                        perf_parts.append(f"DB: {nested_attrs.get('total_db_queries_time')}s")
                     if 'cache_hit' in nested_attrs:
-                        print(f"    Cache Hit: {nested_attrs.get('cache_hit', 'N/A')}")
+                        perf_parts.append(f"Cache: {nested_attrs.get('cache_hit')}")
                     if 'total_row_count' in nested_attrs:
-                        print(f"    Total Rows: {nested_attrs.get('total_row_count', 'N/A')}")
-                    if 'sheet' in nested_attrs:
-                        print(f"    Sheet ID: {nested_attrs.get('sheet', 'N/A')}")
-                    
-                    # Show file info if available
-                    file_info = nested_attrs.get('file_info', {})
-                    if file_info:
-                        print(f"    Source: {file_info.get('file', '')}:{file_info.get('line', '')}")
+                        perf_parts.append(f"Rows: {nested_attrs.get('total_row_count')}")
+                    if perf_parts:
+                        print(f"      {' | '.join(perf_parts)}")
                 
                 # Show event-specific URL if requested and ID is available
                 if show_event_urls and log_id and query:
                     event_url = self.generate_log_url(query, timeframe, log_id)
-                    print(f"    🔗 Direct link: {event_url}")
+                    print(f"      🔗 {event_url}")
             
             if len(logs) > 20:
                 print(f"\n  ... and {len(logs) - 20} more log entries")
@@ -430,45 +486,39 @@ class DatadogExplorer:
         elif query_type == "metrics":
             if 'series' in data:
                 series = data.get('series', [])
-                print(f"\n📊 Query returned {len(series)} series:")
+                print(f"→ {len(series)} series returned")
                 
                 for idx, s in enumerate(series[:5]):  # Show first 5 series
                     metric = s.get('metric', 'unknown')
                     points = s.get('pointlist', [])
                     scope = s.get('scope', '')
                     
-                    print(f"\n  Series {idx + 1}:")
-                    print(f"    Metric: {metric}")
-                    print(f"    Scope: {scope}")
-                    print(f"    Points: {len(points)}")
-                    
                     if points:
-                        # Show first and last few points
-                        print(f"    First point: {datetime.fromtimestamp(points[0][0]/1000).strftime('%Y-%m-%d %H:%M:%S')} = {points[0][1]}")
-                        if len(points) > 1:
-                            print(f"    Last point:  {datetime.fromtimestamp(points[-1][0]/1000).strftime('%Y-%m-%d %H:%M:%S')} = {points[-1][1]}")
-                        
-                        # Calculate stats
                         values = [p[1] for p in points if p[1] is not None]
                         if values:
-                            print(f"    Stats: min={min(values):.2f}, max={max(values):.2f}, avg={sum(values)/len(values):.2f}")
+                            stats = f"min={min(values):.2f}, max={max(values):.2f}, avg={sum(values)/len(values):.2f}"
+                            print(f"\n  [{idx + 1}] {metric} ({len(points)} points)")
+                            print(f"      {scope}")
+                            print(f"      {stats}")
+                        else:
+                            print(f"\n  [{idx + 1}] {metric} - no data")
+                    else:
+                        print(f"\n  [{idx + 1}] {metric} - no points")
                 
                 if len(series) > 5:
                     print(f"\n  ... and {len(series) - 5} more series")
             else:
-                print("📊 Query completed but no series data returned")
+                print("→ No series data returned")
             
             # Display URL if provided
             if url:
-                print(f"\n🔗 View in Datadog Web UI:")
-                print(f"   {url}")
+                print(f"\n🔗 {url}")
             
             return data
 
         # Display URL if provided
         if url:
-            print(f"\n🔗 View in Datadog Web UI:")
-            print(f"   {url}")
+            print(f"\n🔗 {url}")
         
         return data
 
@@ -526,7 +576,14 @@ def main():
     parser.add_argument(
         '--timeframe',
         default='1h',
-        help='Time range for the query (default: 1h). Examples: 5m, 15m, 1h, 24h, 7d'
+        help='''Time range for the query (default: 1h). 
+Formats:
+  - Relative: 5m, 15m, 1h, 24h, 7d
+  - Single day: 2025-01-03
+  - Date range: 2025-01-03,2025-01-05
+  - ISO range: 2025-01-03T10:00:00,2025-01-03T18:00:00
+  - Unix timestamps: 1754539200,1754711999
+  - Unix milliseconds: 1754539200000,1754711999999'''
     )
 
     parser.add_argument(
@@ -556,19 +613,15 @@ def main():
 
     dd = DatadogExplorer()
 
-    # Validate connection
-    if not args.raw:
-        print("🔐 Validating Datadog API connection...")
+    # Validate connection silently unless there's an error
     if not dd.validate_connection():
         print("❌ Failed to validate API key. Please check your configuration.")
         sys.exit(1)
-    
-    if not args.raw:
-        print("✅ Connected to Datadog API")
 
     # Handle special commands
     if args.query == "list-metrics":
-        print(f"🔍 Listing metrics (timeframe: {args.timeframe})...")
+        if not args.raw:
+            print(f"🔍 list-metrics [{args.timeframe}]")
         results = dd.list_metrics(search=args.search or args.query.split(':')[1] if ':' in args.query else None, 
                                  timeframe=args.timeframe)
         if args.raw and results:
@@ -578,7 +631,8 @@ def main():
     
     elif args.query.startswith("info:"):
         metric_name = args.query[5:]
-        print(f"ℹ️ Getting metadata for metric: {metric_name}")
+        if not args.raw:
+            print(f"ℹ️ {args.query}")
         results = dd.get_metric_metadata(metric_name)
         if results:
             print(json.dumps(results, indent=2))
@@ -590,8 +644,7 @@ def main():
         prefix_len = 7 if args.query.startswith("traces:") else 6
         trace_query = args.query[prefix_len:].strip()
         if not args.raw:
-            print(f"🔍 Querying APM traces: {trace_query}")
-            print(f"⏰ Timeframe: {args.timeframe}")
+            print(f"🔍 {args.query} [{args.timeframe}]")
         
         # Generate URL (shown by default unless --no-url)
         url = None if args.no_url else dd.generate_trace_url(trace_query, args.timeframe)
@@ -607,8 +660,7 @@ def main():
         # Log query
         log_query = args.query[5:].strip()
         if not args.raw:
-            print(f"📝 Querying logs: {log_query}")
-            print(f"⏰ Timeframe: {args.timeframe}")
+            print(f"📝 {args.query} [{args.timeframe}]")
         
         # Generate URL (shown by default unless --no-url)
         url = None if args.no_url else dd.generate_log_url(log_query, args.timeframe)
@@ -624,8 +676,8 @@ def main():
     
     else:
         # Regular metric query
-        print(f"📊 Querying: {args.query}")
-        print(f"⏰ Timeframe: {args.timeframe}")
+        if not args.raw:
+            print(f"📊 {args.query} [{args.timeframe}]")
         
         # Generate URL (shown by default unless --no-url)
         url = None if args.no_url else dd.generate_metric_url(args.query, args.timeframe)
