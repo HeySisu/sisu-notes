@@ -101,31 +101,127 @@ aws cloudwatch get-metric-statistics \
 
 **B. SQLAlchemy Pool Configuration**
 
-First, add logging to validate hypothesis:
+First, add comprehensive logging to validate ALL issues:
 ```python
-# Add to session_provider.py for connection lifecycle monitoring
-@event.listens_for(engine, "connect")
+# Add to session_provider.py for complete connection lifecycle monitoring
+import time
+from sqlalchemy import event
+from sqlalchemy.pool import Pool
+
+# Track pool-level events
+@event.listens_for(Pool, "connect")
 def receive_connect(dbapi_conn, connection_record):
+    """Fires when a new DB connection is created"""
     connection_record.info['connect_time'] = time.time()
-    logging.info("connection_opened", 
-                 pool_size=engine.pool.size(),
-                 checked_out=engine.pool.checked_out_connections())
+    connection_record.info['checkout_count'] = 0
+    connection_record.info['total_idle_time'] = 0
+    connection_record.info['last_checkin_time'] = None
+    
+    # Log new connection creation (indicates pool exhaustion or recycling)
+    logging.warning("connection_created",
+                   event="new_connection",
+                   pool_size=connection_record.pool.size(),
+                   overflow=connection_record.pool.overflow(),
+                   total=connection_record.pool.checkedout())
 
-@event.listens_for(engine, "checkout")
+@event.listens_for(Pool, "checkout")
 def receive_checkout(dbapi_conn, connection_record, connection_proxy):
-    age = time.time() - connection_record.info.get('connect_time', 0)
-    logging.info("connection_checkout",
-                 connection_age_seconds=age,
-                 was_idle=age > 1800)  # Flag if >30 min idle
+    """Fires when connection is checked out from pool"""
+    checkout_start = time.time()
+    age = checkout_start - connection_record.info.get('connect_time', 0)
+    
+    # Calculate how long this connection was idle
+    idle_time = 0
+    if connection_record.info.get('last_checkin_time'):
+        idle_time = checkout_start - connection_record.info['last_checkin_time']
+        connection_record.info['total_idle_time'] += idle_time
+    
+    connection_record.info['checkout_count'] += 1
+    connection_record.info['last_checkout_time'] = checkout_start
+    
+    # Log potential issues
+    if idle_time > 1800:  # 30 minutes
+        logging.error("stale_connection_reused",
+                     idle_seconds=idle_time,
+                     connection_age=age,
+                     checkout_count=connection_record.info['checkout_count'],
+                     risk="May be killed by RDS Proxy")
+    
+    if age > 3600:  # 1 hour
+        logging.warning("old_connection_active",
+                       connection_age_seconds=age,
+                       checkouts=connection_record.info['checkout_count'])
+    
+    # Track connection acquisition time (detects pool timeout issues)
+    if hasattr(connection_proxy, '_pool_checkout_timestamp'):
+        wait_time = checkout_start - connection_proxy._pool_checkout_timestamp
+        if wait_time > 5:
+            logging.error("slow_connection_acquisition",
+                         wait_seconds=wait_time,
+                         pool_size=connection_record.pool.size(),
+                         cause="Pool exhaustion or timeout")
 
-@event.listens_for(engine, "first_connect")
-def receive_first_connect(dbapi_conn, connection_record):
+@event.listens_for(Pool, "checkin")
+def receive_checkin(dbapi_conn, connection_record):
+    """Fires when connection is returned to pool"""
+    connection_record.info['last_checkin_time'] = time.time()
+    
+    # Track connection usage duration
+    if connection_record.info.get('last_checkout_time'):
+        usage_time = time.time() - connection_record.info['last_checkout_time']
+        if usage_time > 60:
+            logging.warning("long_connection_usage",
+                          usage_seconds=usage_time,
+                          checkouts=connection_record.info['checkout_count'])
+
+@event.listens_for(Pool, "reset")
+def receive_reset(dbapi_conn, connection_record):
+    """Fires when connection is reset (recycled)"""
+    age = time.time() - connection_record.info.get('connect_time', 0)
+    logging.info("connection_recycled",
+                age_seconds=age,
+                total_checkouts=connection_record.info.get('checkout_count', 0),
+                total_idle_time=connection_record.info.get('total_idle_time', 0))
+
+@event.listens_for(Pool, "invalidate")
+def receive_invalidate(dbapi_conn, connection_record, exception):
+    """Fires when connection is invalidated due to error"""
+    age = time.time() - connection_record.info.get('connect_time', 0)
+    logging.error("connection_invalidated",
+                 age_seconds=age,
+                 exception=str(exception),
+                 checkouts=connection_record.info.get('checkout_count', 0))
+
+# Track actual connection establishment time (TLS handshake)
+@event.listens_for(engine, "do_connect")
+def receive_do_connect(dialect, conn_rec, cargs, cparams):
+    """Measure actual connection establishment time"""
     start = time.time()
-    duration = time.time() - start
-    if duration > 2.0:
-        logging.warning("slow_connection_establishment",
-                       duration_seconds=duration,
-                       likely_cause="TLS_handshake")
+    try:
+        connection = dialect.do_connect(cargs, cparams)
+        duration = time.time() - start
+        if duration > 1.0:
+            logging.warning("slow_tls_handshake",
+                          duration_seconds=duration,
+                          cause="TLS negotiation with RDS Proxy")
+        return connection
+    except Exception as e:
+        duration = time.time() - start
+        logging.error("connection_failed",
+                     duration_seconds=duration,
+                     error=str(e))
+        raise
+
+# Monitor pool timeout events
+@event.listens_for(Pool, "timeout")
+def receive_timeout(dbapi_conn, connection_record):
+    """Fires when pool.get() times out waiting for connection"""
+    logging.error("pool_timeout",
+                 message="Failed to acquire connection from pool",
+                 pool_size=connection_record.pool.size(),
+                 overflow=connection_record.pool.overflow(),
+                 checked_out=connection_record.pool.checkedout(),
+                 cause="All connections busy, pool exhausted")
 ```
 
 After confirming with logs, implement comprehensive fix:
