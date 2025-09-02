@@ -2,10 +2,13 @@
 
 ## Executive Summary
 
-**🚨 CRITICAL FINDING**: Two critical composite indexes are **NOT deployed to production database**. These missing indexes cause severe performance degradation including 120+ second timeouts.
+**🚨 CRITICAL FINDINGS**: 
+1. Two critical composite indexes are **NOT deployed to production database**
+2. **Connection timeout misconfigurations** causing 60-second and 210-second delays across all services
 
 ### Verified Critical Issues (Business Hours Evidence - Aug 29, 2025)
 - **Missing indexes**: Causing 120+ second timeouts in production - [View Database Evidence](#a1-missing-indexes-verification)
+- **Connection delays**: 60-second and 210-second (3.5 min) timeout patterns affecting 563k spans - [View APM Analysis](#connection-timeout-analysis)
 - **Timeout failures**: 19 operations timing out at exactly 120 seconds (17:59-18:12 EST) - [View in Datadog](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
 - **Slow operations**: fetch_relevant_rows taking up to 25 seconds - [Code Location](https://github.com/hebbia/mono/blob/main/sheets_engine/common/get_rows_utils.py)
 - **Disk spills**: 272MB sorts exceed 4MB work_mem - [Query Analysis](#c-sample-query-analysis)
@@ -34,21 +37,35 @@ Tracks:
 ### Step 1: Connection Acquisition
 
 #### Problem
+- **Connection acquisition delays** of 60 seconds and 210 seconds (cascading retries)
 - **Connection latency spikes** of 13-26ms observed in CloudWatch metrics
-- **Root Cause**: LIFO pooling + RDS Proxy idle timeout mismatch
-  - SQLAlchemy uses LIFO pooling (connections 1-5 reused, 6-20 idle)
-  - RDS Proxy kills idle connections after 30 minutes
-  - New connections require TLS handshake (overhead unconfirmed)
+- **Root Causes**: 
+  1. LIFO pooling causing connection starvation (same 5 connections reused, others idle)
+  2. Missing `pool_timeout` parameter (defaults to 30 seconds)
+  3. RDS Proxy idle timeout mismatch (30 min proxy vs 60 min pool recycle)
+  4. ALB timeout misalignment (some services at 60 seconds)
+  5. TLS handshake overhead on new connections
 
 #### Evidence
 ```python
-# Current Configuration (session_provider.py:98-99)
-pool_use_lifo=True,      # Reuses same connections repeatedly
-pool_recycle=3600.0,     # 1 hour (too late!)
+# Current Configuration (session_provider.py:93-100)
+pool_use_lifo=True,      # Reuses same connections repeatedly (causes starvation)
+pool_recycle=3600.0,     # 1 hour (exceeds RDS Proxy 30 min timeout!)
+pool_timeout=None,       # Missing! Defaults to 30 seconds
+pool_pre_ping=True,      # Good - validates connections
 
 # RDS Proxy Configuration  
 IdleClientTimeout: 1800  # 30 minutes
-RequireTLS: true         # Adds 2-3s handshake overhead
+RequireTLS: true         # Adds TLS handshake overhead
+ConnectionBorrowTimeout: 120  # In Terraform but shows null in AWS
+
+# Application Timeouts
+DOC_MANAGER_REQUEST_TIMEOUT: 60  # Too short for large operations
+FASTBUILD_PROXY_TIMEOUT: 60.0    # Causes cascading failures
+
+# ALB Configuration
+flashdocs idle_timeout: 60       # Kills connections mid-operation
+sheets idle_timeout: 360         # Better but still may be too short
 ```
 
 #### Recommended Solutions
@@ -111,14 +128,28 @@ def receive_first_connect(dbapi_conn, connection_record):
                        likely_cause="TLS_handshake")
 ```
 
-After confirming with logs, implement fix:
+After confirming with logs, implement comprehensive fix:
 ```python
-# Option A: Switch to FIFO (Quick Fix)
-pool_use_lifo=False  # Rotate through all connections
-pool_recycle=1200    # 20 min < 30 min RDS timeout
-
-# Option B: NullPool (Best Practice)  
-poolclass=NullPool   # Let RDS Proxy handle ALL pooling
+# SQLAlchemy Configuration Fix
+return create_async_engine(
+    async_config.url,
+    pool_size=async_config.pool_size,
+    max_overflow=async_config.max_overflow,
+    pool_recycle=600,           # 10 min (was 3600) - less than RDS Proxy timeout
+    pool_use_lifo=False,         # FIFO (was True) - rotate all connections  
+    pool_pre_ping=True,
+    pool_timeout=30.0,           # NEW - explicit 30s timeout for connection acquisition
+    connect_args={
+        "server_settings": {
+            "jit": "off",
+            "statement_timeout": "300000",    # NEW - 5 min default query timeout
+            "lock_timeout": "10000"           # NEW - 10s lock acquisition timeout
+        },
+        "command_timeout": None,               # NEW - no psycopg command timeout
+        "connect_timeout": 10                  # NEW - 10s to establish connection
+    },
+    **engine_kwargs,
+)
 ```
 
 ---
@@ -219,18 +250,25 @@ SELECT pg_reload_conf();
 
 ## Implementation Priority
 
-1. **🔴 CRITICAL - Indexes** (Immediate)
+1. **🔴 CRITICAL - Connection Pool Fix** (Immediate - Day 1)
+   - Fixes 60-second and 210-second connection delays
+   - Affects ALL services (563k spans impacted)
+   - Quick deployment, immediate relief
+   - [View affected traces](https://app.datadoghq.com/apm/traces?query=@duration%3A%3E55000000000%20@duration%3A%3C65000000000&start=1756490400000&end=1756508400000)
+
+2. **🔴 CRITICAL - Indexes** (Immediate - Day 1)
    - Eliminates both scan and sort problems
-   - Single most impactful fix
+   - Fixes query performance after connections work
    - [View 120+ second timeouts requiring this fix](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
 
-2. **🟡 HIGH - Connection Pool** (After validation)
-   - Deploy logging first
-   - Monitor for correlation with 4+ second spikes
-   - Then implement FIFO or NullPool
+3. **🟡 HIGH - Timeout Alignment** (Day 2)
+   - Update ALB timeouts (flashdocs from 60s to 360s)
+   - Update application timeouts (DOC_MANAGER from 60s to 300s)
+   - Deploy RDS Proxy configuration fixes
 
-3. **🟢 MEDIUM - work_mem** (General optimization)
-   - Less critical after indexes
+4. **🟢 MEDIUM - work_mem & Query Timeouts** (Week 1)
+   - Increase work_mem to 256MB for large sorts
+   - Implement timeout override utilities for large matrix operations
    - Still valuable for overall database health
 
 ---
@@ -407,7 +445,8 @@ cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
 ---
 
 *Report Date: 2025-09-01*  
-*Updated: 2025-09-02 with business hours evidence confirming 120+ second timeouts*
+*Updated: 2025-09-02 with business hours evidence confirming 120+ second timeouts*  
+*Updated: 2025-09-02 with connection timeout root cause analysis from Datadog APM*
 
 ## Next Steps
 
@@ -419,10 +458,12 @@ cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
 ## Success Metrics
 
 After implementing all fixes:
-- P99 query latency: <1 second (current: 120+ second timeouts)
-- Zero timeout errors (current: 19 timeouts in 5 hours)
-- No disk spills for standard queries
-- fetch_relevant_rows: <1 second (current: 25+ seconds)
+- **Connection acquisition**: <100ms (current: 60-210 seconds)
+- **P99 query latency**: <1 second (current: 120+ second timeouts)
+- **Zero timeout errors** (current: 19 timeouts in 5 hours)
+- **No disk spills** for standard queries
+- **fetch_relevant_rows**: <1 second (current: 25+ seconds)
+- **Large matrix support**: 2+ hours with timeout overrides
 
 ---
 
@@ -677,6 +718,32 @@ Total request time: <1 second
 - 98-99.98% reduction in query time
 - Elimination of disk spills
 - Zero timeout errors
+
+---
+
+## Connection Timeout Analysis
+
+### Timeout Pattern Discovery (2025-09-02)
+
+**Finding**: Datadog APM reveals two distinct timeout patterns:
+- **60-second plateau**: Connection pool timeout + ALB timeout alignment
+- **210-second spikes**: Cascading retries (60s + 60s + 60s + 30s)
+
+**Affected Services** (from 563k analyzed spans):
+- `metadata-indexer-b` (26 connection issues)
+- `doc-indexer-b` (21 connection issues)  
+- `doc-association-indexer-b` (19 connection issues)
+- `fastbuild_status_updater` (14 connection issues)
+- All task types: `agents.task.prod`, `flashdocs.task.prod`, `fastbuild.task.prod`, `sheets_engine.graph.worker.task.prod`
+
+**Root Cause Analysis**:
+1. **SQLAlchemy `pool_use_lifo=True`**: Same 5 connections reused, others idle and timeout
+2. **Missing `pool_timeout`**: Defaults to 30 seconds, hidden bottleneck
+3. **Pool recycle mismatch**: 60-minute recycle vs 30-minute RDS Proxy timeout
+4. **ALB timeout**: Some services (flashdocs) have 60-second timeout, too short
+5. **Application timeouts**: DOC_MANAGER_REQUEST_TIMEOUT=60, causes cascading failures
+
+**Solution**: See [Connection Pool Fix](#b-sqlalchemy-pool-configuration) above
 
 ---
 

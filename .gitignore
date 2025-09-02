@@ -22,5 +22,4 @@ Thumbs.db
 # Configuration secrets
 tools/config.py
 
-# Symbolic links
 mono
