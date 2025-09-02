@@ -22,6 +22,7 @@ import argparse
 import requests
 from datetime import datetime, timedelta
 import re
+import urllib.parse
 
 def ensure_venv():
     """Ensure we're running in the virtual environment"""
@@ -223,6 +224,68 @@ class DatadogExplorer:
                 print(f"Response: {e.response.text}")
             return None
 
+    def generate_log_url(self, query: str, timeframe: str = "1h", event_id: str = None) -> str:
+        """Generate Datadog Log Explorer URL, optionally for a specific event"""
+        seconds_ago = self.parse_timeframe(timeframe)
+        to_time = datetime.now()
+        from_time = to_time - timedelta(seconds=seconds_ago)
+        
+        # Convert to milliseconds timestamp
+        from_ts = int(from_time.timestamp() * 1000)
+        to_ts = int(to_time.timestamp() * 1000)
+        
+        # URL encode the query
+        encoded_query = urllib.parse.quote(query)
+        
+        # Build the base URL
+        url = f"https://app.datadoghq.com/logs?query={encoded_query}"
+        
+        # Add event ID if provided
+        if event_id:
+            url += f"&event={event_id}"
+        
+        # Add standard parameters
+        url += f"&from_ts={from_ts}&to_ts={to_ts}"
+        url += "&agg_m=count&agg_m_source=base&agg_t=count"
+        url += "&cols=host%2Cservice&fromUser=true&messageDisplay=inline"
+        url += "&refresh_mode=sliding&storage=hot&stream_sort=desc&viz=stream&live=true"
+        
+        return url
+    
+    def generate_trace_url(self, query: str, timeframe: str = "1h") -> str:
+        """Generate Datadog APM Trace URL"""
+        seconds_ago = self.parse_timeframe(timeframe)
+        to_time = datetime.now()
+        from_time = to_time - timedelta(seconds=seconds_ago)
+        
+        # Convert to milliseconds timestamp
+        start_ms = int(from_time.timestamp() * 1000)
+        end_ms = int(to_time.timestamp() * 1000)
+        
+        # URL encode the query
+        encoded_query = urllib.parse.quote(query)
+        
+        # Build the URL
+        url = f"https://app.datadoghq.com/apm/traces?query={encoded_query}&start={start_ms}&end={end_ms}&paused=true"
+        return url
+    
+    def generate_metric_url(self, query: str, timeframe: str = "1h") -> str:
+        """Generate Datadog Metrics Explorer URL"""
+        seconds_ago = self.parse_timeframe(timeframe)
+        to_time = datetime.now()
+        from_time = to_time - timedelta(seconds=seconds_ago)
+        
+        # Convert to seconds timestamp
+        from_ts = int(from_time.timestamp())
+        to_ts = int(to_time.timestamp())
+        
+        # URL encode the query
+        encoded_query = urllib.parse.quote(query)
+        
+        # Build the URL
+        url = f"https://app.datadoghq.com/metric/explorer?from_ts={from_ts}&to_ts={to_ts}&live=true&query={encoded_query}"
+        return url
+
     def validate_connection(self):
         """Validate API keys"""
         try:
@@ -239,7 +302,7 @@ class DatadogExplorer:
             print(f"❌ Connection validation failed: {e}")
             return False
 
-    def format_results(self, data: dict, query_type: str = "metrics"):
+    def format_results(self, data: dict, query_type: str = "metrics", url: str = None, show_event_urls: bool = False, query: str = None, timeframe: str = "1h"):
         """Format results for display"""
         if not data:
             return None
@@ -309,6 +372,9 @@ class DatadogExplorer:
             for idx, log_entry in enumerate(logs[:20]):  # Show first 20 logs
                 attrs = log_entry.get('attributes', {})
                 
+                # Extract log ID for direct link
+                log_id = log_entry.get('id', None)
+                
                 # Extract main attributes
                 timestamp = attrs.get('timestamp', 'unknown')
                 message = attrs.get('message', 'no message')
@@ -350,6 +416,11 @@ class DatadogExplorer:
                     file_info = nested_attrs.get('file_info', {})
                     if file_info:
                         print(f"    Source: {file_info.get('file', '')}:{file_info.get('line', '')}")
+                
+                # Show event-specific URL if requested and ID is available
+                if show_event_urls and log_id and query:
+                    event_url = self.generate_log_url(query, timeframe, log_id)
+                    print(f"    🔗 Direct link: {event_url}")
             
             if len(logs) > 20:
                 print(f"\n  ... and {len(logs) - 20} more log entries")
@@ -387,8 +458,18 @@ class DatadogExplorer:
             else:
                 print("📊 Query completed but no series data returned")
             
+            # Display URL if provided
+            if url:
+                print(f"\n🔗 View in Datadog Web UI:")
+                print(f"   {url}")
+            
             return data
 
+        # Display URL if provided
+        if url:
+            print(f"\n🔗 View in Datadog Web UI:")
+            print(f"   {url}")
+        
         return data
 
 def main():
@@ -458,6 +539,18 @@ def main():
         action='store_true',
         help='Output raw JSON response'
     )
+    
+    parser.add_argument(
+        '--no-url',
+        action='store_true',
+        help='Hide Datadog web UI URL (URLs are shown by default)'
+    )
+    
+    parser.add_argument(
+        '--event-urls',
+        action='store_true',
+        help='Show direct links to individual log events (for logs only)'
+    )
 
     args = parser.parse_args()
 
@@ -500,12 +593,15 @@ def main():
             print(f"🔍 Querying APM traces: {trace_query}")
             print(f"⏰ Timeframe: {args.timeframe}")
         
+        # Generate URL (shown by default unless --no-url)
+        url = None if args.no_url else dd.generate_trace_url(trace_query, args.timeframe)
+        
         results = dd.query_traces(trace_query, args.timeframe)
         
         if args.raw and results:
             print(json.dumps(results, indent=2, default=str))
         else:
-            dd.format_results(results, query_type="traces")
+            dd.format_results(results, query_type="traces", url=url)
     
     elif args.query.startswith("logs:"):
         # Log query
@@ -514,24 +610,32 @@ def main():
             print(f"📝 Querying logs: {log_query}")
             print(f"⏰ Timeframe: {args.timeframe}")
         
+        # Generate URL (shown by default unless --no-url)
+        url = None if args.no_url else dd.generate_log_url(log_query, args.timeframe)
+        
         results = dd.query_logs(log_query, args.timeframe)
         
         if args.raw and results:
             print(json.dumps(results, indent=2, default=str))
         else:
-            dd.format_results(results, query_type="logs")
+            dd.format_results(results, query_type="logs", url=url, 
+                            show_event_urls=args.event_urls, query=log_query, 
+                            timeframe=args.timeframe)
     
     else:
         # Regular metric query
         print(f"📊 Querying: {args.query}")
         print(f"⏰ Timeframe: {args.timeframe}")
         
+        # Generate URL (shown by default unless --no-url)
+        url = None if args.no_url else dd.generate_metric_url(args.query, args.timeframe)
+        
         results = dd.query_metrics(args.query, args.timeframe)
         
         if args.raw and results:
             print(json.dumps(results, indent=2, default=str))
         else:
-            dd.format_results(results, query_type="metrics")
+            dd.format_results(results, query_type="metrics", url=url)
 
 if __name__ == "__main__":
     main()
