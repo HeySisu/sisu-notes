@@ -20,6 +20,10 @@ Query metrics, logs, and APM traces from Datadog. API keys in `tools/config.py`.
   jq -r '.data[].attributes.attributes.total_db_queries_time' | \
   awk '{if($1<0.1) fast++; else if($1<1) normal++; else slow++} 
        END {printf "Fast: %d, Normal: %d, Slow: %d\n", fast, normal, slow}'
+
+# Count occurrences of specific log patterns
+.venv/bin/python tools/datadog_explorer.py "logs:\"slow get_relevant_rows query\"" --timeframe 24h --raw | \
+  jq -r '.data | length'  # Returns up to 100 (API limit)
 ```
 
 ### 📝 Log Queries
@@ -73,7 +77,31 @@ Query metrics, logs, and APM traces from Datadog. API keys in `tools/config.py`.
 .venv/bin/python tools/datadog_explorer.py "info:postgresql.connections"
 ```
 
+### 🔬 APM Traces (NEW)
+```bash
+# Query application traces
+.venv/bin/python tools/datadog_explorer.py "traces:service:sheets" --timeframe 1h
+
+# Filter traces by duration (in nanoseconds)
+.venv/bin/python tools/datadog_explorer.py "traces:service:sheets @duration:>1000000000" --timeframe 1h
+
+# Get raw trace data for analysis
+.venv/bin/python tools/datadog_explorer.py "traces:service:sheets" --raw | \
+  jq '.data[].attributes | {resource_name, duration: .custom.duration}'
+
+# Note: Database operations are not captured as separate spans
+# Use application logs for database performance analysis instead
+```
+
 ## Query Syntax
+
+### Trace Query Syntax (NEW)
+- **Prefix**: All trace queries start with `traces:`
+- **Service**: `traces:service:sheets`
+- **Duration**: `traces:@duration:>1000000000` (in nanoseconds, >1s)
+- **Environment**: `traces:env:prod`
+- **Combined**: `traces:service:sheets @duration:>1000000000`
+- **Raw output**: Add `--raw` for JSON analysis with jq
 
 ### Log Query Syntax
 - **Prefix**: All log queries start with `logs:`
@@ -161,11 +189,19 @@ Query metrics, logs, and APM traces from Datadog. API keys in `tools/config.py`.
 
 ## Key Findings from Investigation
 
-From analyzing `get_rows` performance logs:
+From analyzing `get_rows` performance:
+
+### Application Logs
 - **10% of queries are critical** (>1 second execution time)
 - **Average DB query time: 0.704s** even with cache hits
 - **Missing indexes** cause 48+ second queries (see final_report.md)
 - **Common errors**: Transaction rollbacks, parse failures
+
+### APM Traces (NEW)
+- **_get_relevant_rows_cached**: 2.8-3.1 second operations confirmed
+- **/ssrm/get-rows**: API endpoints taking 3.7-10 seconds
+- **Database spans**: Not captured separately, included in application spans
+- **Slow operations**: 100+ traces >1 second found in 2-hour window
 
 ## Quick Reference
 
@@ -191,9 +227,38 @@ ddlogs "percentile:trace.postgres.query.time{*}:95" --timeframe 1h
 ddlogs "percentile:trace.request.duration{service:sheets}:95" --timeframe 1h
 ```
 
+## Important Limitations & Learnings
+
+### API Limitations
+- **Log Results**: Maximum 100 logs returned per query (use timeframe to narrow)
+- **APM Traces**: Database operations not captured as separate spans in application traces
+  - `resource_name:postgres` queries return no results
+  - Database timing must be inferred from application-level logs
+- **Metric Names**: PostgreSQL connection metrics not available via standard trace metrics
+- **Connection Logs**: SQLAlchemy/psycopg2 connection timing not logged by default
+
+### Working Alternatives
+- Use AWS CloudWatch for RDS Proxy metrics instead of Datadog APM
+- Search for application-level slow query logs instead of connection traces
+- Use `--raw` output with jq for complex filtering and counting
+
+### Common Pitfalls
+- Searching for `trace.postgres.*` metrics returns no data
+- `resource_name:*postgres*` in logs doesn't match database operations
+- Connection pool logs often about LaunchDarkly, not PostgreSQL
+
+## Recent Tool Enhancements (2025-09-02)
+
+- **APM Trace Support Added**: New `traces:` prefix for querying application performance traces
+- **Duration Filtering**: Support for @duration filters to find slow operations
+- **Raw Trace Analysis**: Full JSON output with --raw flag for detailed analysis
+- **Confirmed Finding**: _get_relevant_rows_cached operations taking 2.8-3.1 seconds
+
 ## Troubleshooting
 
 - **SSL Warning**: Ignore LibreSSL warnings - non-critical
 - **No data**: Expand timeframe or check service name
 - **Rate limit**: 1000 requests/hour for metrics
 - **Authentication**: Verify keys in tools/config.py
+- **Empty results**: Try broader search terms, check service names
+- **No database spans**: Database operations included in application spans, not separate

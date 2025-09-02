@@ -380,6 +380,9 @@ cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py "EXPLAIN (ANALYZ
 
 # Verbose analysis for complex queries
 cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py "EXPLAIN (ANALYZE, BUFFERS, VERBOSE) SELECT answer FROM cells WHERE answer ILIKE '%search_term%' LIMIT 10"
+
+# Check existing indexes on a table (crucial for performance)
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py --env prod "SELECT indexname FROM pg_indexes WHERE tablename = 'cells' ORDER BY indexname"
 ```
 
 ### Key Performance Metrics
@@ -679,6 +682,34 @@ ORDER BY (rb.num_docs_parsing + rb.num_docs_encode_and_feeding) DESC
 - ✅ Comprehensive table schema knowledge
 - ✅ Sample data insights for all major tables
 - 🚫 **NO WRITE OPERATIONS** - Database-level readonly protection
+
+## Key Learnings from Investigation
+
+### What Works Well
+- **pg_indexes query**: Fast way to verify missing indexes
+- **pg_settings query**: Reveals configuration issues (work_mem, etc.)
+- **JSON output**: Easy to parse with jq for analysis
+- **--env flag**: Seamless switching between staging/prod
+
+### Common Use Cases
+```bash
+# Check if specific indexes exist (performance debugging)
+.venv/bin/python tools/db_explorer.py --env prod \
+  "SELECT indexname FROM pg_indexes WHERE tablename = 'cells' AND indexname LIKE '%hash%'"
+
+# Get database configuration settings
+.venv/bin/python tools/db_explorer.py --env prod \
+  "SELECT name, setting, unit FROM pg_settings WHERE name IN ('work_mem', 'effective_io_concurrency')"
+
+# Count rows for performance analysis
+.venv/bin/python tools/db_explorer.py --env prod \
+  "SELECT COUNT(*) FROM cells WHERE sheet_id = 'UUID'"
+```
+
+### Limitations Discovered
+- **EXPLAIN ANALYZE on prod**: Can be slow on large tables, use with care
+- **UUID placeholders**: Using fake UUIDs in EXPLAIN queries returns empty plans
+- **Large result sets**: Tool truncates output, use LIMIT for control
 
 ## Usage Notes
 

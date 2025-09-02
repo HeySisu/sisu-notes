@@ -116,6 +116,20 @@ aws --profile readonly --region us-east-1 cloudwatch list-metrics \
   --output json | jq '.Metrics[].MetricName' | sort | uniq
 ```
 
+### Connection Establishment Rate (New Learning)
+```bash
+# Monitor how often new connections are created (indicates connection recycling)
+aws --profile readonly --region us-east-1 cloudwatch get-metric-statistics \
+  --namespace AWS/RDS \
+  --metric-name DatabaseConnectionsSetupSucceeded \
+  --dimensions Name=ProxyName,Value=hebbia-backend-postgres-prod \
+  --start-time $(date -u -v-2H '+%Y-%m-%dT%H:%M:%S') \
+  --end-time $(date -u '+%Y-%m-%dT%H:%M:%S') \
+  --period 300 --statistics Sum \
+  --output json | jq '.Datapoints | sort_by(.Timestamp) | .[] | {time: .Timestamp, new_connections: .Sum}'
+# High values (>10 per 5 min) indicate connection churn problem
+```
+
 ### Failed Connections Check
 ```bash
 # Should always be 0 in healthy system
@@ -178,3 +192,19 @@ aws --profile readonly --region us-east-1 rds describe-db-proxies \
 ## 7. Staging Environment
 
 Replace `hebbia-backend-postgres-prod` with `hebbia-backend-postgres-staging` in any command above to check staging metrics.
+
+## 8. Key Learnings & Best Practices
+
+### What Works Well
+- **DatabaseConnectionsBorrowLatency**: Best metric for connection acquisition delays
+- **DatabaseConnectionsSetupSucceeded**: Reveals connection churn patterns
+- **Maximum statistics**: Better than Average for spotting latency spikes
+
+### What Doesn't Work
+- **TargetGroup dimension**: Often returns empty results, omit for better data
+- **Trace metrics**: Not available via CloudWatch, use Datadog for application traces
+
+### Interpretation Guidelines
+- **Borrow Latency >10ms**: Indicates connection pressure
+- **New Connections >10/5min**: Shows excessive connection recycling
+- **Connection spikes**: Correlate with 30-minute intervals = idle timeout issue

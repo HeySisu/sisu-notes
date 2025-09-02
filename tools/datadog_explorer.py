@@ -55,7 +55,9 @@ class DatadogExplorer:
         self.api_key = PROD_DATADOG_API_KEY
         self.app_key = PROD_DATADOG_APP_KEY
         self.base_url = "https://api.datadoghq.com/api/v1"
-        self.logs_url = "https://api.datadoghq.com/api/v2/logs/events/search"
+        self.base_url_v2 = "https://api.datadoghq.com/api/v2"
+        self.logs_url = f"{self.base_url_v2}/logs/events/search"
+        self.traces_url = f"{self.base_url_v2}/spans/events/search"
         self.headers = {
             "DD-API-KEY": self.api_key,
             "DD-APPLICATION-KEY": self.app_key
@@ -180,6 +182,47 @@ class DatadogExplorer:
                 print(f"Response: {e.response.text}")
             return None
 
+    def query_traces(self, query: str, timeframe: str = "1h", limit: int = 100):
+        """Query Datadog APM traces/spans"""
+        seconds_ago = self.parse_timeframe(timeframe)
+        to_time = datetime.now()
+        from_time = to_time - timedelta(seconds=seconds_ago)
+        
+        # Format times in RFC3339 format required by spans API
+        from_str = from_time.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        to_str = to_time.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        
+        payload = {
+            "data": {
+                "type": "search_request",
+                "attributes": {
+                    "filter": {
+                        "from": from_str,
+                        "to": to_str,
+                        "query": query
+                    },
+                    "page": {
+                        "limit": limit
+                    },
+                    "sort": "timestamp"
+                }
+            }
+        }
+        
+        try:
+            response = requests.post(
+                self.traces_url,
+                json=payload,
+                headers={**self.headers, "Content-Type": "application/json"}
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"❌ Trace query failed: {e}")
+            if hasattr(e.response, 'text'):
+                print(f"Response: {e.response.text}")
+            return None
+
     def validate_connection(self):
         """Validate API keys"""
         try:
@@ -208,6 +251,55 @@ class DatadogExplorer:
                 print(f"  • {metric}")
             if len(metrics) > 50:
                 print(f"  ... and {len(metrics) - 50} more")
+            return data
+        
+        elif query_type == "traces":
+            traces = data.get('data', [])
+            print(f"\n🔍 Found {len(traces)} trace spans:")
+            
+            for idx, trace in enumerate(traces[:20]):  # Show first 20 traces
+                attrs = trace.get('attributes', {})
+                custom = attrs.get('custom', {})
+                
+                # Extract main attributes
+                timestamp = attrs.get('start_timestamp', attrs.get('end_timestamp', 'unknown'))
+                resource_name = attrs.get('resource_name', attrs.get('operation_name', 'unknown'))
+                service = attrs.get('service', custom.get('base_service', 'unknown'))
+                duration = custom.get('duration', 0)
+                env = attrs.get('env', custom.get('env', 'unknown'))
+                error = attrs.get('error')
+                
+                # Extract database info if present
+                db_info = custom.get('db', {})
+                db_statement = db_info.get('statement', '')
+                
+                # Try to parse timestamp
+                try:
+                    ts = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    ts_str = ts.strftime('%Y-%m-%d %H:%M:%S')
+                except:
+                    ts_str = timestamp
+                
+                # Convert duration from nanoseconds to milliseconds
+                duration_ms = duration / 1_000_000 if duration else 0
+                
+                print(f"\n  Span {idx + 1}:")
+                print(f"    Time: {ts_str}")
+                print(f"    Service: {service}")
+                print(f"    Resource: {resource_name}")
+                print(f"    Duration: {duration_ms:.2f}ms")
+                
+                # Show additional attributes if present
+                if env != 'unknown':
+                    print(f"    Environment: {env}")
+                if db_statement:
+                    print(f"    DB Statement: {db_statement[:100]}...")  # Truncate long statements
+                if error:
+                    print(f"    Error: {error}")
+            
+            if len(traces) > 20:
+                print(f"\n  ... and {len(traces) - 20} more trace spans")
+            
             return data
         
         elif query_type == "logs":
@@ -326,6 +418,12 @@ def main():
   logs:service:sheets status:error                           # Service errors
   logs:@performance.total_db_queries_time:>1                 # Slow queries
 
+🔍 APM TRACES (prefix with 'traces:' or 'spans:'):
+  traces:env:prod resource_name:postgres.connect             # DB connections
+  traces:env:prod resource_name:postgres.connect @duration:>1000000000  # Slow DB connections (>1s)
+  traces:service:sheets @duration:>5000000000                # Slow traces (>5s)
+  traces:env:prod service:postgres                           # All postgres traces
+
 🔍 DISCOVERY:
   list-metrics                                                # List all metrics
   list-metrics --search postgres                             # Find specific metrics
@@ -393,6 +491,21 @@ def main():
             print(json.dumps(results, indent=2))
         else:
             print("No metadata found")
+    
+    elif args.query.startswith("traces:") or args.query.startswith("spans:"):
+        # APM trace/span query
+        prefix_len = 7 if args.query.startswith("traces:") else 6
+        trace_query = args.query[prefix_len:].strip()
+        if not args.raw:
+            print(f"🔍 Querying APM traces: {trace_query}")
+            print(f"⏰ Timeframe: {args.timeframe}")
+        
+        results = dd.query_traces(trace_query, args.timeframe)
+        
+        if args.raw and results:
+            print(json.dumps(results, indent=2, default=str))
+        else:
+            dd.format_results(results, query_type="traces")
     
     elif args.query.startswith("logs:"):
         # Log query

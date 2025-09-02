@@ -419,9 +419,9 @@ cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py --env prod \
 - ❌ `ix_cells_sheet_tab_versioned_col_hash_updated` (5 columns for DISTINCT ON)
 - ❌ `ix_cells_max_updated_at_per_sheet_tab` (4 columns for MAX queries)
 
-### A.2 Connection Latency Metrics
+### A.2 Connection Latency & Pool Metrics
 
-**Command**: Check RDS Proxy connection borrow latency
+**Command 1**: Check RDS Proxy connection borrow latency
 ```bash
 aws --profile readonly --region us-east-1 cloudwatch get-metric-statistics \
   --namespace AWS/RDS \
@@ -438,6 +438,29 @@ aws --profile readonly --region us-east-1 cloudwatch get-metric-statistics \
 {"Timestamp": "2025-09-02T02:39:00+00:00", "LatencyMs": 13.062}
 {"Timestamp": "2025-09-02T02:44:00+00:00", "LatencyMs": 26.392}
 ```
+
+**Command 2**: Monitor new connection establishment rate
+```bash
+aws --profile readonly --region us-east-1 cloudwatch get-metric-statistics \
+  --namespace AWS/RDS \
+  --metric-name DatabaseConnectionsSetupSucceeded \
+  --dimensions Name=ProxyName,Value=hebbia-backend-postgres-prod \
+  --start-time $(date -u -v-2H '+%Y-%m-%dT%H:%M:%S') \
+  --end-time $(date -u '+%Y-%m-%dT%H:%M:%S') \
+  --period 300 --statistics Sum
+```
+
+**Output**: High connection churn rate
+```json
+{"time": "2025-09-02T01:39:00", "new_connections": 24}  // Spike
+{"time": "2025-09-02T01:44:00", "new_connections": 8}
+{"time": "2025-09-02T02:04:00", "new_connections": 11}
+```
+
+**Analysis**: 
+- Frequent new connection establishment (6-24 per 5 minutes)
+- Indicates connections being recycled due to idle timeout
+- Each new connection requires TLS handshake (adds latency)
 
 ### A.3 Database Configuration
 
@@ -459,7 +482,7 @@ cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py --env prod \
 
 ### A.4 Slow Query Evidence
 
-**Command**: Find slow get_rows queries in Datadog
+**Command 1**: Find slow get_rows queries in Datadog
 ```bash
 cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
   "logs:run_get_rows_db_queries" --timeframe 24h --raw | \
@@ -473,6 +496,31 @@ Sheet: N/A | Time: 5.886s | Timestamp: 2025-08-31T22:49:42.541Z
 Sheet: N/A | Time: 5.8984s | Timestamp: 2025-08-31T22:49:48.767Z
 Sheet: N/A | Time: 5.7043s | Timestamp: 2025-08-31T22:50:05.755Z
 Sheet: N/A | Time: 5.0368s | Timestamp: 2025-08-31T22:50:11.444Z
+```
+
+**Command 2**: Count slow query occurrences
+```bash
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
+  "logs:\"slow get_relevant_rows query\"" --timeframe 24h --raw | \
+  jq -r '.data | length'
+```
+
+**Output**: 100+ slow queries in 24 hours
+```
+100  // Maximum returned by API, likely more exist
+```
+
+**Command 3**: Recent slow query alerts
+```bash
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
+  "logs:\"slow\" postgres" --timeframe 4h
+```
+
+**Output**: Consistent pattern of slow queries
+```json
+{"timestamp": "2025-09-01T18:58:43", "service": "sheets", "message": "slow get_relevant_rows query taking > 2 seconds"}
+{"timestamp": "2025-09-01T18:58:44", "service": "sheets", "message": "slow get_relevant_rows query taking > 2 seconds"}
+{"timestamp": "2025-09-01T18:58:57", "service": "sheets", "message": "slow get_relevant_rows query taking > 2 seconds"}
 ```
 
 ### A.5 RDS Proxy Configuration
