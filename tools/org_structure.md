@@ -25,7 +25,7 @@
   - Reports to: George Sivulka
 
 ### Engineering Leadership
-- **Rob Day** - Head of Engineering | *Current head of Engineering*
+- **Rob Day** - Head of Engineering | *Current head of Engineering* | `hebbia-rob`
   - Reports to: George Sivulka
 
 ### People Operations
@@ -55,7 +55,7 @@
 ### Security Team
 - **Matt Aromatorio** - Senior Director, Security
   - Reports to: Rob Day
-  - **Deepak Chauhan** - IT Contract Admin, Okta | `ddanylc-hebbia`
+  - **Deepak Chauhan** - IT Contract Admin, Okta
     - Reports to: Matt Aromatorio
   - **Dan Le** - IT Contract Admin, Okta
     - Reports to: Matt Aromatorio
@@ -69,7 +69,7 @@
   - Reports to: Rob Day
   - **Artem Shemet** - Engineering | `Artem-Shemet`
     - Reports to: Dor Ben David
-  - **Oleksandr Shvets** - Engineering
+  - **Oleksandr Shvets** - Engineering | `alex-hebbia`
     - Reports to: Dor Ben David
 
 ### Platform Engineering Team
@@ -83,11 +83,11 @@
   - Reports to: Ben Devore
   - **Omar Chowdhury** - Forward Deployed Engineer | `omar-at-hebbia`
     - Reports to: Anukrati Bhandari
-  - **Mislav Gillinger** - Engineering | `gillinger-hebbia`
+  - **Mislav Gillinger** - Engineering
     - Reports to: Anukrati Bhandari
   - **Joffin Manjaly** - Forward Deployed Engineer | `joffin-m-hebbia`
     - Reports to: Anukrati Bhandari
-  - **Kyrylo Skriaha** - Engineer (Contractor) | `kyrylo-hebbia`
+  - **Kyrylo Skriaha** - Engineer (Contractor)
     - Reports to: Anukrati Bhandari
   - **Jon Zanillo** - Software Engineer | `jon-hebbia`
     - Reports to: Anukrati Bhandari
@@ -115,7 +115,7 @@
     - Reports to: Ammar Husain
   - **Ethan Fuchs** - Staff Software Engineer | `fuchse`
     - Reports to: Ammar Husain
-  - **Victor Geary** - Software Engineer | `vikashebbia`
+  - **Victor Geary** - Software Engineer
     - Reports to: Ammar Husain
   - **Wilson Jusuf** - Software Engineer | `wilsonaurus`
     - Reports to: Ammar Husain
@@ -127,9 +127,9 @@
 ### AI/ML Engineering Team
 - **Adithya Ramanathan** - Engineering Manager | `adithram`
   - Reports to: Rob Day
-  - **Alex Flick** - Software Engineer | `alex-hebbia` / `0xflick`
+  - **Alex Flick** - Software Engineer | `0xflick`
     - Reports to: Adithya Ramanathan
-  - **Lucas Haarmann** - Software Engineer | `Lucas-H1` / `lexheb`
+  - **Lucas Haarmann** - Software Engineer | `Lucas-H1`
     - Reports to: Adithya Ramanathan
   - **Tas Hasting** - Senior Software Engineer | `tascodes`
     - Reports to: Adithya Ramanathan
@@ -137,7 +137,7 @@
     - Reports to: Adithya Ramanathan
 
 ### AI/ML Engineering - Specialized Roles
-- **Adam Khakhar** - Engineering Lead, Artifact Generation | `adamkhakhar`
+- **Adam Khakhar** - Engineering Lead, Artifact Generation | `adam-khakhar-hebbia`
   - Reports to: Adithya Ramanathan
 - **Will Luer** - Software Engineer | `williamluer`
   - Reports to: Adithya Ramanathan
@@ -233,6 +233,10 @@ George Sivulka (CEO)
 
 ---
 
-*Last Updated: August 25, 2025*
-*Source: Company Organizational Chart Screenshots*
-*GitHub usernames added based on commit activity analysis*
+*Last Updated: January 2025*
+*Source: Company Organizational Chart Screenshots and Slack Thread*
+*GitHub usernames confirmed via team Slack thread*
+
+## Additional Team Members (GitHub usernames from Slack thread)
+- **Andoni Tsougarakis** - Engineering | `tonyturbo`
+- **Dima Danylchenko** - Engineering | `ddanylc-hebbia`

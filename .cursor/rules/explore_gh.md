@@ -81,14 +81,20 @@ gh pr status --repo hebbia/mono
 
 ### Recent Repository Activity
 ```bash
-# Recent commits (in hebbia/mono)
-gh api repos/hebbia/mono/commits --field since="2024-08-15T00:00:00Z" --jq '.[].commit | {message: .message, author: .author.name, date: .author.date}'
+# Recent commits (in hebbia/mono) - get last N commits
+gh api repos/hebbia/mono/commits --jq '.[0:5] | .[] | {message: .commit.message, author: .commit.author.name, date: .commit.author.date}'
 
-# Recent commits by specific author (in hebbia/mono)
-gh api repos/hebbia/mono/commits --field author=sisuxi --field since="2024-08-15T00:00:00Z"
+# Recent commits with filter by date
+gh api repos/hebbia/mono/commits --jq '.[] | select(.commit.author.date >= "2025-08-15T00:00:00Z") | {message: .commit.message, author: .commit.author.name, date: .commit.author.date}'
+
+# Recent commits by specific author (search API is more reliable)
+gh search commits --author=sisuxi --repo=hebbia/mono --sort=committer-date --order=desc --json sha,commit
 
 # Recent issues (in hebbia/mono)
 gh issue list --repo hebbia/mono --state all --limit 20 --json number,title,state,createdAt,author
+
+# Get issues assigned to me
+gh issue list --repo hebbia/mono --assignee sisuxi --state open
 ```
 
 ## Common Query Examples
@@ -216,11 +222,11 @@ gh repo set-default hebbia/mono
 
 ## Date Helpers
 
-**Common date ranges:**
-- Past week: `--created=">=2024-08-15"`
-- Past month: `--created=">=2024-07-22"`
-- Past 3 months: `--created=">=2024-05-22"`
-- Specific date range: `--created="2024-08-01..2024-08-22"`
+**Common date ranges (adjust dates as needed):**
+- Past week: `--created=">=2025-08-25"`
+- Past month: `--created=">=2025-08-01"`
+- Past 3 months: `--created=">=2025-06-01"`
+- Specific date range: `--created="2025-08-01..2025-09-01"`
 
 **Dynamic dates (use in scripts):**
 ```bash
@@ -258,15 +264,103 @@ gh pr list --repo hebbia/mono --author sisuxi
 gh pr list --repo hebbia/mono --json number,title,author,createdAt --template '{{range .}}{{.number}}\t{{.title}}\t{{.author.login}}\t{{.createdAt}}\n{{end}}'
 ```
 
+## Advanced Queries
+
+### Code Review Analytics
+
+```bash
+# PRs reviewed by me
+gh search prs --repo=hebbia/mono --reviewed-by=sisuxi --created=">=2025-08-01"
+
+# PRs waiting for my review
+gh pr list --repo hebbia/mono --search "review-requested:sisuxi"
+
+# PRs with conflicts
+gh pr list --repo hebbia/mono --state open --json number,title,mergeable --jq '.[] | select(.mergeable == "CONFLICTING")'
+```
+
+### Workflow & CI/CD
+
+```bash
+# Recent workflow runs
+gh run list --repo hebbia/mono --limit 10
+
+# Failed workflow runs
+gh run list --repo hebbia/mono --status failure --limit 5
+
+# View specific workflow run details
+gh run view --repo hebbia/mono <run-id>
+```
+
+### Branch Management
+
+```bash
+# List all branches
+gh api repos/hebbia/mono/branches --jq '.[].name'
+
+# Find stale branches (not updated in 30 days)
+gh api repos/hebbia/mono/branches --jq '.[] | select((.commit.commit.author.date | fromdate) < (now - 2592000)) | .name'
+
+# Delete a remote branch
+gh api -X DELETE repos/hebbia/mono/git/refs/heads/<branch-name>
+```
+
+### PR Metrics
+
+```bash
+# Average PR merge time (last 20 merged PRs)
+gh pr list --repo hebbia/mono --state merged --limit 20 --json mergedAt,createdAt --jq '[.[] | ((.mergedAt | fromdate) - (.createdAt | fromdate)) / 86400] | add/length | floor'
+
+# PR approval patterns
+gh pr list --repo hebbia/mono --state all --limit 50 --json reviews --jq '.[] | .reviews | group_by(.author.login) | map({author: .[0].author.login, count: length})'
+```
+
+## Troubleshooting
+
+### Common Issues & Solutions
+
+**Authentication Issues:**
+
+```bash
+# If getting 401/403 errors
+gh auth refresh
+gh auth switch --hostname github.com --user sisuxi
+
+# Verify token scopes
+gh auth status --show-token
+```
+
+**Rate Limiting:**
+
+```bash
+# Check rate limit status
+gh api rate_limit
+
+# If rate limited, wait or use pagination
+gh pr list --repo hebbia/mono --limit 10 --paginate
+```
+
+**API Errors:**
+
+```bash
+# Debug API calls with verbose output
+GH_DEBUG=api gh pr list --repo hebbia/mono
+
+# Check API response headers
+gh api repos/hebbia/mono -i | head -20
+```
+
 ## Authentication & Setup
 
 **Current status:**
+
 - **Authenticated as:** `sisuxi` (Hebbia work account - ONLY)
 - **SSH keys configured** for Hebbia account
 - **Default repo:** `hebbia/mono`
 - **Git protocol:** SSH
 
 **Key Commands:**
+
 - `gh auth status` - Check current authentication
 - `gh auth switch --hostname github.com --user sisuxi` - Ensure Hebbia account
 - `gh repo set-default hebbia/mono` - Set default repository
@@ -284,11 +378,13 @@ gh pr list --repo hebbia/mono --json number,title,author,createdAt --template '{
 ### Important: Account Management
 
 **GitHub CLI Configuration:**
+
 - GitHub CLI authentication automatically uses the Hebbia account (`sisuxi`)
 - SSH host configuration uses `github_hebbia` for all operations
 - All operations are scoped to Hebbia organization and repositories
 
 **Best Practices:**
+
 1. **Single account workflow:** All operations use Hebbia account exclusively
 2. **Automatic verification:** Account switching and verification happens automatically
 3. **Repository access:** All commands default to `hebbia/mono` repository
