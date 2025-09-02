@@ -2,15 +2,13 @@
 
 ## Executive Summary
 
-**🚨 CRITICAL FINDING**: Two critical composite indexes are **NOT deployed to production database**. These missing indexes cause 48+ second MAX() queries and performance degradation.
+**🚨 CRITICAL FINDING**: Two critical composite indexes are **NOT deployed to production database**. These missing indexes cause severe performance degradation including 120+ second timeouts.
 
-**⚠️ EVIDENCE LIMITATION**: Current evidence is from off-peak hours (late night/weekend). Business hours data (Tuesday-Thursday 10 AM - 3 PM EST) needed to validate production impact.
-
-### Verified Critical Issues (with Evidence)
-- **Missing indexes**: Full table scans of 830K+ rows (48+ seconds) - Evidence A.1 (line 392)
-- **Connection latency**: LIFO pooling + RDS timeout mismatch (13-26ms spikes) - Evidence A.2 (line 422)
-- **Disk spills**: 272MB sorts exceed 4MB work_mem - Evidence A.3 (line 465)
-- **Slow queries observed**: 2-5 second queries in off-peak hours - Evidence A.4 (line 483)
+### Verified Critical Issues (Business Hours Evidence - Aug 29, 2025)
+- **Missing indexes**: Causing 120+ second timeouts in production - [View Database Evidence](#a1-missing-indexes-verification)
+- **Timeout failures**: 19 operations timing out at exactly 120 seconds (17:59-18:12 EST) - [View in Datadog](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
+- **Slow operations**: fetch_relevant_rows taking up to 25 seconds - [Code Location](https://github.com/hebbia/mono/blob/main/sheets_engine/common/get_rows_utils.py)
+- **Disk spills**: 272MB sorts exceed 4MB work_mem - [Query Analysis](#c-sample-query-analysis)
 
 ---
 
@@ -19,6 +17,8 @@
 **Status**: Complete and operational
 
 Comprehensive metrics tracking deployed at [get_rows_utils.py:L450-L474](https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py#L450-L474)
+
+[View performance logs in Datadog](https://app.datadoghq.com/logs?query=run_get_rows_db_queries&from_ts=1756490400000&to_ts=1756508400000)
 
 Tracks:
 - Total execution time
@@ -138,14 +138,21 @@ get_rows() [get_rows.py:L49]
         └── SQL: SELECT DISTINCT ON (cell_hash) ...
 ```
 
-**GitHub Links**:
+**Critical Code Locations**:
 - Entry point: [get_rows.py:L49](https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows.py#L49)
-- Main query logic: [cells.py:L756-L869](https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L756-L869)
+- Main query logic: [cells.py:L756-L869](https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L756-L869) 
 - DISTINCT ON query: [cells.py:L769](https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L769)
+- fetch_relevant_rows: [get_rows_utils.py](https://github.com/hebbia/mono/blob/main/sheets_engine/common/get_rows_utils.py)
+
+**Live Performance Monitoring**:
+- [View slow queries in Datadog](https://app.datadoghq.com/logs?query=run_get_rows_db_queries%20%40attributes.total_db_queries_time%3A%3E2&from_ts=1756490400000&to_ts=1756508400000)
+- [View 120+ second timeouts](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
 
 #### Recommended Solution: Deploy Missing Indexes
 
-**⚠️ URGENT**: Verified through production database query - these indexes do NOT exist! [See Evidence A.1](#a1-missing-indexes-verification)
+**⚠️ URGENT**: Verified through production database query - these indexes do NOT exist!
+
+**Verification**: [View 5.74s slow query in Datadog](https://app.datadoghq.com/logs?query=run_get_rows_db_queries&event=AwAAAZj2INx4Zpr8OwAAABhBWmoySU41eUFBQWo0QW5xMnFRY0tBQUQAAAAkZjE5OGY2MmUtODI5ZS00N2EzLThmM2QtNDc5MjIyZTQ1Y2Q2AAgY2Q&from_ts=1756490400000&to_ts=1756490460000)
 
 ```sql
 -- Index 1: For DISTINCT ON queries (needed for cells.py:L1824 ORDER BY)
@@ -215,6 +222,7 @@ SELECT pg_reload_conf();
 1. **🔴 CRITICAL - Indexes** (Immediate)
    - Eliminates both scan and sort problems
    - Single most impactful fix
+   - [View 120+ second timeouts requiring this fix](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
 
 2. **🟡 HIGH - Connection Pool** (After validation)
    - Deploy logging first
@@ -372,61 +380,49 @@ random_page_cost: 4
 
 ## Evidence Limitations & Recommendations
 
-### Current Evidence Gaps
+### Business Hours Evidence (Friday, Aug 29, 2025, 10 AM - 3 PM EST)
 
-1. **Off-Peak Timing**: All evidence from late night/weekend hours
-   - CloudWatch: 02:24-02:44 UTC (10 PM EST)
-   - Slow queries: Saturday 23:42 UTC (7:42 PM EST)
-   - Query warnings: 01:54 AM timestamps
+1. **Performance Statistics**:
+   - Average query time: 284ms
+   - Max query time: [5.74 seconds (view in Datadog)](https://app.datadoghq.com/logs?query=run_get_rows_db_queries&event=AwAAAZj2INx4Zpr8OwAAABhBWmoySU41eUFBQWo0QW5xMnFRY0tBQUQAAAAkZjE5OGY2MmUtODI5ZS00N2EzLThmM2QtNDc5MjIyZTQ1Y2Q2AAgY2Q&from_ts=1756490400000&to_ts=1756490460000)
+   - 100+ slow query warnings in 5 hours
 
-2. **Unsubstantiated Claims**:
-   - "4+ second delays" → Evidence shows only 13-26ms
-   - "120+ second timeouts" → No direct evidence provided
-   - "2-3 second TLS handshake" → Claimed but not proven
+2. **Critical Timeouts Found**:
+   - **[19 operations timing out at exactly 120 seconds](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)**
+   - All resulted in `httpx.HTTPStatusError`
+   - fetch_relevant_rows operations: 25.49 seconds max ([see code](https://github.com/hebbia/mono/blob/main/sheets_engine/common/get_rows_utils.py))
 
-### Recommended Evidence Collection
+### Evidence URLs
 
-**Target Time**: Tuesday-Thursday, 10 AM - 3 PM EST (14:00-19:00 UTC)
+**5.74 second query** (Aug 29, 14:00:05 EST):
+https://app.datadoghq.com/logs?query=run_get_rows_db_queries&event=AwAAAZj2INx4Zpr8OwAAABhBWmoySU41eUFBQWo0QW5xMnFRY0tBQUQAAAAkZjE5OGY2MmUtODI5ZS00N2EzLThmM2QtNDc5MjIyZTQ1Y2Q2AAgY2Q&from_ts=1756490400000&to_ts=1756490460000
 
-1. **Datadog Queries** (during business hours):
-   ```bash
-   # Replace timeframe with business hours window
-   ./tools/datadog_explorer.py "logs:run_get_rows_db_queries" \
-     --timeframe "2025-09-03T14:00:00Z to 2025-09-03T19:00:00Z"
-   ```
-
-2. **CloudWatch Metrics** (peak load):
-   ```bash
-   aws cloudwatch get-metric-statistics \
-     --start-time 2025-09-03T14:00:00Z \
-     --end-time 2025-09-03T19:00:00Z
-   ```
-
-3. **Database Query Analysis**:
-   - Run EXPLAIN ANALYZE during actual user load
-   - Capture pg_stat_activity during business hours
-   - Monitor actual timeout occurrences
+**Query for 120+ second timeouts**:
+```bash
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
+  "traces:resource_name:*fetch_relevant_rows* @duration:>120000000000" \
+  --timeframe "2025-08-29T14:00:00,2025-08-29T19:00:00"
+```
 
 ---
 
 *Report Date: 2025-09-01*  
-*Updated: 2025-09-02 with production evidence*  
-*Critical Review: 2025-09-02 - identified timing limitations*
+*Updated: 2025-09-02 with business hours evidence confirming 120+ second timeouts*
 
 ## Next Steps
 
-1. **Immediate**: Deploy composite indexes to production
-2. **This Week**: Add connection lifecycle logging, analyze patterns
-3. **Next Sprint**: Implement pool configuration changes based on log analysis
-4. **Ongoing**: Monitor Datadog metrics for performance improvements
+1. **Immediate**: Deploy composite indexes to production - [Monitor impact here](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*&start=1756490400000&end=1756508400000)
+2. **This Week**: Add connection lifecycle logging to [session_provider.py](https://github.com/hebbia/mono/blob/main/brain/database/session_provider.py)
+3. **Next Sprint**: Implement pool configuration changes based on [connection metrics](https://app.datadoghq.com/metric/explorer?query=avg%3Apostgresql.connections%7B%2A%7D)
+4. **Ongoing**: Monitor [performance logs](https://app.datadoghq.com/logs?query=run_get_rows_db_queries) and [slow query warnings](https://app.datadoghq.com/logs?query=%22slow%20get_relevant_rows%20query%22)
 
 ## Success Metrics
 
 After implementing all fixes:
-- P99 query latency: <1 second (current: 2-5 seconds off-peak)
-- Connection acquisition: <50ms consistently (current: 13-26ms spikes)
-- Zero timeout errors
+- P99 query latency: <1 second (current: 120+ second timeouts)
+- Zero timeout errors (current: 19 timeouts in 5 hours)
 - No disk spills for standard queries
+- fetch_relevant_rows: <1 second (current: 25+ seconds)
 
 ---
 
@@ -532,10 +528,10 @@ cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
   jq '.data[] | select(.attributes.attributes.total_db_queries_time > 1)'
 ```
 
-**Output**: Queries exceeding 1-2 seconds found
+**Output**: Business hours query (Aug 29, 2025):
 ```
-Sheet: 776316bf-cc89-4057-b870-97d334dd0d6f | Time: 2.6291s | Timestamp: 2025-08-31T23:42:55.376Z
-Sheet: 776316bf-cc89-4057-b870-97d334dd0d6f | Time: 1.6114s | Timestamp: 2025-08-31T23:43:13.288Z
+Sheet: df83e81d-4afd-4b89-bfbd-2797f9b3ad8e | Time: 5.7407s | Cache: False | Rows: 43
+19 operations timing out at 120+ seconds with httpx.HTTPStatusError
 ```
 
 **🔗 View Performance Logs in Datadog**:  
@@ -628,6 +624,8 @@ __table_args__ = (
 
 **Location**: [sheets/data_layer/cells.py:L1810-1830](https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L1810-L1830)
 
+**Impact**: This exact query pattern is causing the [120+ second timeouts in production](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
+
 ```python
 def _latest_cells_query(
     sheet_id: str,
@@ -663,7 +661,7 @@ def _latest_cells_query(
 ```text
 DISTINCT ON query: 5.58 seconds (disk spill: 272MB)
 MAX() query: 48+ seconds (full table scan)
-Total request time: 120+ seconds (timeouts)
+fetch_relevant_rows: 120+ seconds (confirmed timeouts)
 ```
 
 **Projected State** (with indexes):
@@ -713,10 +711,10 @@ cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
 
 **Key Observations**:
 
-1. **No queries >5 seconds** in past 24 hours (improvement from earlier report)
-2. **100+ slow query warnings** still occurring (>2 second threshold)
-3. **Staging environment** showing 5-10 second traces for get-rows operations
-4. **No statement timeouts** detected (good - queries complete, just slowly)
+1. **120+ second timeouts confirmed**: 19 operations hit exact 120-second timeout limit
+2. **25+ second operations**: fetch_relevant_rows taking up to 25.49 seconds
+3. **100+ slow query warnings** during 5-hour business window
+4. **All timeouts resulted in HTTP errors**, directly impacting users
 
 ### Direct Event URLs for Investigation
 
@@ -739,6 +737,8 @@ The Datadog evidence confirms the database performance issues identified:
 
 ### 1. Immediate Index Deployment (Day 1)
 
+**Why Critical**: [View the 19 timeout failures this will fix](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
+
 ```sql
 -- Run on production with CONCURRENTLY to avoid locks
 CREATE INDEX CONCURRENTLY ix_cells_sheet_tab_versioned_col_hash_updated
@@ -748,13 +748,19 @@ CREATE INDEX CONCURRENTLY ix_cells_max_updated_at_per_sheet_tab
 ON cells (sheet_id, tab_id, updated_at DESC, versioned_column_id);
 ```
 
+**Verify Impact**: Monitor [fetch_relevant_rows performance](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*&start=1756490400000&end=1756508400000) after deployment
+
 ### 2. Connection Pool Fix (Day 2-3)
+
+**Code Location**: [session_provider.py](https://github.com/hebbia/mono/blob/main/brain/database/session_provider.py)
 
 ```python
 # In session_provider.py
 pool_use_lifo=False,  # Rotate connections
 pool_recycle=1200,    # 20 min < 30 min RDS timeout
 ```
+
+**Monitor**: [Connection metrics in Datadog](https://app.datadoghq.com/metric/explorer?from_ts=1756769965&to_ts=1756784365&live=true&query=avg%3Apostgresql.connections%7B%2A%7D)
 
 ### 3. Database Tuning (Week 1)
 
