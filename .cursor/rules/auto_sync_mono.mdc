@@ -5,12 +5,25 @@ alwaysApply: true
 # Auto-sync Mono Repository
 
 ## Rule
-Before any code query or analysis, pull the latest changes from the local `mono` repository.
+The `mono/` folder is a read-only reference copy of the Hebbia mono repository. Always pull latest changes before code analysis.
 
-## Implementation
+## Quick Sync
 ```bash
-cd mono && git pull && cd ..
+# From anywhere in sisu-notes
+cd ~/Hebbia/sisu-notes/mono && git pull
 ```
 
-## Purpose
-Ensures all code queries work with the latest version from the main branch.
+## When to Sync
+- Before analyzing code from mono repository
+- When investigating recent changes or deployments
+- When updating reports with code references
+
+## GitHub Mapping
+Map local files to GitHub URLs:
+- Local: `mono/brain/models/cells.py:198-212`
+- GitHub: `https://github.com/hebbia/mono/blob/main/brain/models/cells.py#L198-L212`
+
+## Notes
+- This is a read-only copy - never make local changes
+- Always stays on main branch
+- Used for code exploration and reference only

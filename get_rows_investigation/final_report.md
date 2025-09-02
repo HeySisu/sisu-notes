@@ -3,7 +3,7 @@
 ## Executive Summary
 
 **🚨 CRITICAL FINDINGS**: 
-1. Two critical composite indexes are **NOT deployed to production database**
+1. ~~Two critical composite indexes are **NOT deployed to production database**~~ **✅ UPDATE: Indexes merged to main, awaiting production deployment**
 2. **Connection timeout misconfigurations** causing 60-second and 210-second delays across all services
 
 ### Verified Critical Issues (Business Hours Evidence - Aug 29, 2025)
@@ -277,7 +277,10 @@ get_rows() [get_rows.py:L49]
 
 #### Recommended Solution: Deploy Missing Indexes
 
-**⚠️ URGENT**: Verified through production database query - these indexes do NOT exist!
+**✅ UPDATE (2025-09-02)**: Indexes have been **MERGED to main branch**!
+- **Model Definition**: [brain/models/cells.py:L198-L212](https://github.com/hebbia/mono/blob/main/brain/models/cells.py#L198-L212)
+- **Migration File**: [340fa1ccadc5](https://github.com/hebbia/mono/blob/main/migrations/versions/2025_09_02_1447-340fa1ccadc5_add_indexes_with_desc_ordering_for_get_.py)
+- **Status**: Ready for production deployment via migration
 
 **Verification**: [View 5.74s slow query in Datadog](https://app.datadoghq.com/logs?query=run_get_rows_db_queries&event=AwAAAZj2INx4Zpr8OwAAABhBWmoySU41eUFBQWo0QW5xMnFRY0tBQUQAAAAkZjE5OGY2MmUtODI5ZS00N2EzLThmM2QtNDc5MjIyZTQ1Y2Q2AAgY2Q&from_ts=1756490400000&to_ts=1756490460000)
 
@@ -346,16 +349,17 @@ SELECT pg_reload_conf();
 
 ## Implementation Priority
 
-1. **🔴 CRITICAL - Connection Pool Fix** (Immediate - Day 1)
+1. **🔴 CRITICAL - Deploy Database Migration** (Immediate - Day 1) ✅ Code Merged
+   - Run migration [340fa1ccadc5](https://github.com/hebbia/mono/blob/main/migrations/versions/2025_09_02_1447-340fa1ccadc5_add_indexes_with_desc_ordering_for_get_.py) in production
+   - Creates two critical composite indexes
+   - Eliminates both scan and sort problems
+   - [View 120+ second timeouts this will fix](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
+
+2. **🔴 CRITICAL - Connection Pool Fix** (Immediate - Day 1-2)
+   - Update [session_provider.py](https://github.com/hebbia/mono/blob/main/brain/database/session_provider.py#L93-L100)
    - Fixes 60-second and 210-second connection delays
    - Affects ALL services (563k spans impacted)
-   - Quick deployment, immediate relief
    - [View affected traces](https://app.datadoghq.com/apm/traces?query=@duration%3A%3E55000000000%20@duration%3A%3C65000000000&start=1756490400000&end=1756508400000)
-
-2. **🔴 CRITICAL - Indexes** (Immediate - Day 1)
-   - Eliminates both scan and sort problems
-   - Fixes query performance after connections work
-   - [View 120+ second timeouts requiring this fix](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
 
 3. **🟡 HIGH - Timeout Alignment** (Day 2)
    - Update ALB timeouts (flashdocs from 60s to 360s)
@@ -542,13 +546,14 @@ cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
 
 *Report Date: 2025-09-01*  
 *Updated: 2025-09-02 with business hours evidence confirming 120+ second timeouts*  
-*Updated: 2025-09-02 with connection timeout root cause analysis from Datadog APM*
+*Updated: 2025-09-02 with connection timeout root cause analysis from Datadog APM*  
+*Updated: 2025-09-02 with code merge confirmation - indexes ready for production deployment*
 
 ## Next Steps
 
-1. **Immediate**: Deploy composite indexes to production - [Monitor impact here](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*&start=1756490400000&end=1756508400000)
-2. **This Week**: Add connection lifecycle logging to [session_provider.py](https://github.com/hebbia/mono/blob/main/brain/database/session_provider.py)
-3. **Next Sprint**: Implement pool configuration changes based on [connection metrics](https://app.datadoghq.com/metric/explorer?query=avg%3Apostgresql.connections%7B%2A%7D)
+1. **Immediate**: Run migration `340fa1ccadc5` in production - [Monitor impact here](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*&start=1756490400000&end=1756508400000)
+2. **Day 1-2**: Update [session_provider.py](https://github.com/hebbia/mono/blob/main/brain/database/session_provider.py#L93-L100) with connection pool fixes
+3. **This Week**: Add connection lifecycle logging to validate pool behavior
 4. **Ongoing**: Monitor [performance logs](https://app.datadoghq.com/logs?query=run_get_rows_db_queries) and [slow query warnings](https://app.datadoghq.com/logs?query=%22slow%20get_relevant_rows%20query%22)
 
 ## Success Metrics
@@ -566,6 +571,11 @@ After implementing all fixes:
 ## Evidence Appendix
 
 ### A.1 Missing Indexes Verification
+
+**⚠️ UPDATE (2025-09-02)**: Indexes have been **MERGED to main branch** and migration created!
+- **Code Location**: [brain/models/cells.py:L198-L212](https://github.com/hebbia/mono/blob/main/brain/models/cells.py#L198-L212)
+- **Migration**: [2025_09_02_1447-340fa1ccadc5](https://github.com/hebbia/mono/blob/main/migrations/versions/2025_09_02_1447-340fa1ccadc5_add_indexes_with_desc_ordering_for_get_.py)
+- **Status**: Awaiting deployment to production
 
 **Command**: Verify indexes in production database
 ```bash
@@ -591,9 +601,9 @@ cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py --env prod \
 ]
 ```
 
-**Missing Indexes**:
-- ❌ `ix_cells_sheet_tab_versioned_col_hash_updated` (5 columns for DISTINCT ON)
-- ❌ `ix_cells_max_updated_at_per_sheet_tab` (4 columns for MAX queries)
+**Indexes Added in Code (Pending Production Deployment)**:
+- ✅ `ix_cells_sheet_tab_versioned_col_hash_updated` (5 columns for DISTINCT ON)
+- ✅ `ix_cells_max_updated_at_per_sheet_tab` (4 columns for MAX queries)
 
 ### A.2 Connection Latency & Pool Metrics
 
