@@ -10,6 +10,8 @@ import os
 import sys
 import json
 import argparse
+import subprocess
+import socket
 
 def ensure_venv():
     """Ensure we're running in the virtual environment"""
@@ -32,6 +34,53 @@ ensure_venv()
 
 import psycopg2
 from typing import List, Dict, Any
+
+def check_tailscale_connection():
+    """Check if Tailscale VPN is connected"""
+    try:
+        # Try the Tailscale CLI first (works on macOS with app installed)
+        # On macOS, the CLI is at /Applications/Tailscale.app/Contents/MacOS/Tailscale
+        tailscale_paths = [
+            'tailscale',  # If installed via brew or in PATH
+            '/Applications/Tailscale.app/Contents/MacOS/Tailscale'  # macOS app
+        ]
+        
+        tailscale_cmd = None
+        for path in tailscale_paths:
+            try:
+                result = subprocess.run([path, 'status'], 
+                                      capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    tailscale_cmd = path
+                    break
+            except (subprocess.SubprocessError, FileNotFoundError):
+                continue
+        
+        if not tailscale_cmd:
+            return False, "Tailscale CLI not found. Please ensure Tailscale app is installed and running"
+        
+        # Get status
+        result = subprocess.run([tailscale_cmd, 'status'], 
+                               capture_output=True, text=True, timeout=5)
+        
+        # Check if we're connected (look for active status)
+        status_output = result.stdout
+        if 'Tailscale is stopped' in status_output:
+            return False, "Tailscale is stopped. Please start the Tailscale app"
+        
+        # Additional check: try to resolve the database hosts
+        staging_host = 'hebbia-backend-postgres-staging.cqyf4jsjudre.us-east-1.rds.amazonaws.com'
+        
+        try:
+            socket.gethostbyname(staging_host)
+            return True, "Tailscale connected and database hosts are reachable"
+        except socket.gaierror:
+            return False, "Tailscale appears connected but cannot resolve database hosts. Check VPN configuration."
+            
+    except subprocess.TimeoutExpired:
+        return False, "Tailscale status check timed out"
+    except Exception as e:
+        return False, f"Error checking Tailscale status: {e}"
 
 try:
     from config import STAGING_DB_PASSWORD, PROD_DB_PASSWORD
@@ -94,6 +143,19 @@ class HebbiaDatabaseExplorer:
             return []
 
 def main():
+    # Check Tailscale VPN connection first
+    vpn_connected, vpn_message = check_tailscale_connection()
+    if not vpn_connected:
+        print(f"❌ VPN Error: {vpn_message}")
+        print("\n📡 To connect to Hebbia database, you need Tailscale VPN:")
+        print("  1. Install Tailscale: https://tailscale.com/download")
+        print("  2. Start Tailscale: tailscale up")
+        print("  3. Authenticate if prompted")
+        print("  4. Try this command again")
+        sys.exit(1)
+    
+    print(f"✅ VPN Check: {vpn_message}")
+    
     parser = argparse.ArgumentParser(
         description='Hebbia Database Explorer - READ-ONLY SQL Query Tool',
         formatter_class=argparse.RawDescriptionHelpFormatter,

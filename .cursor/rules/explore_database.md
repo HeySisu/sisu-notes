@@ -4,6 +4,29 @@
 
 **Description:** Query and explore the Hebbia PostgreSQL database with complete table knowledge and **READ-ONLY** SQL execution from the sisu-notes repository. Uses readonly database users - write operations are blocked at the database level. **ALWAYS defaults to staging** unless production is specifically requested.
 
+## Prerequisites: Tailscale VPN
+
+**IMPORTANT:** Database access requires Tailscale VPN connection. The tool will automatically check VPN status before attempting connection.
+
+### VPN Setup
+```bash
+# Install Tailscale (if not installed)
+# macOS: brew install tailscale
+# Linux: curl -fsSL https://tailscale.com/install.sh | sh
+
+# Connect to VPN
+tailscale up
+
+# Check VPN status
+tailscale status
+```
+
+The db_explorer.py tool will:
+1. Check if Tailscale is installed and running
+2. Verify database hosts are reachable through VPN
+3. Only proceed with database connection if VPN is active
+4. Provide helpful error messages if VPN is not connected
+
 ## Environment Selection
 
 - **Default (Staging)**: `python tools/db_explorer.py "query"` - Safe for exploration and testing
@@ -345,6 +368,91 @@ ORDER BY pg_relation_size(i.oid) DESC
 - **KMS encryption** for sensitive data
 - **MFA support** at organization level
 
+## Performance Debugging with EXPLAIN ANALYZE
+
+### Understanding Query Performance
+```bash
+# Analyze query execution plan with timing - staging default (READ-ONLY, safe to run)
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py "EXPLAIN ANALYZE SELECT * FROM cells WHERE sheet_id = 'YOUR_UUID' LIMIT 100"
+
+# Analyze with buffer usage (shows cache hits vs disk reads)
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py "EXPLAIN (ANALYZE, BUFFERS) SELECT c.*, r.y_value FROM cells c JOIN rows r ON c.row_id = r.id WHERE c.sheet_id = 'YOUR_UUID' LIMIT 100"
+
+# Verbose analysis for complex queries
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py "EXPLAIN (ANALYZE, BUFFERS, VERBOSE) SELECT answer FROM cells WHERE answer ILIKE '%search_term%' LIMIT 10"
+```
+
+### Key Performance Metrics
+- **Actual Time**: Real execution time in milliseconds
+- **Rows**: Planned vs actual row counts (large discrepancies = outdated statistics)
+- **Buffers**: `shared hit` (cache) vs `read` (disk) - high disk reads = slow performance
+- **Scan Types**: 
+  - `Index Scan` = good for selective queries
+  - `Seq Scan` = full table scan, slow on large tables
+  - `Bitmap Index Scan` = good for OR conditions
+- **Join Types**:
+  - `Nested Loop` = good for small datasets
+  - `Hash Join` = good for large unsorted data
+  - `Merge Join` = good for pre-sorted data
+
+### Common Performance Issues
+
+#### Missing Index Detection
+```bash
+# Look for Sequential Scan on large tables
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py "EXPLAIN ANALYZE SELECT * FROM cells WHERE answer = 'specific_value'"
+# Red flag: "Seq Scan on cells (cost=0.00..1234567.89 rows=1000000)"
+```
+
+#### Inefficient Join Performance
+```bash
+# Check join algorithm choice
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py "EXPLAIN ANALYZE SELECT * FROM documents d JOIN repository_documents rd ON d.repo_doc_id = rd.id WHERE d.org_id = 'UUID'"
+# Watch for: Nested Loop with millions of iterations
+```
+
+#### Memory Pressure in Sorting
+```bash
+# Check for disk-based sorting
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py "EXPLAIN ANALYZE SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 1000"
+# Red flag: "Sort Method: external merge Disk: 123456kB"
+```
+
+### Production Performance Monitoring
+
+#### Currently Running Slow Queries
+```bash
+# Find queries running >5 seconds
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py --env prod "SELECT pid, now() - query_start AS duration, LEFT(query, 100) as query_preview, state FROM pg_stat_activity WHERE (now() - query_start) > interval '5 seconds' AND state != 'idle' ORDER BY duration DESC"
+```
+
+#### Table Bloat Analysis
+```bash
+# Identify tables needing VACUUM
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py "SELECT tablename, n_live_tup, n_dead_tup, ROUND(n_dead_tup::numeric / NULLIF(n_live_tup, 0) * 100, 2) AS dead_percent, pg_size_pretty(pg_total_relation_size('public.'||tablename)) AS size FROM pg_stat_user_tables WHERE n_dead_tup > 10000 ORDER BY n_dead_tup DESC LIMIT 10"
+```
+
+#### Index Usage Statistics
+```bash
+# Find unused or rarely used indexes
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py "SELECT schemaname, tablename, indexname, idx_scan, pg_size_pretty(pg_relation_size(indexrelid)) AS size FROM pg_stat_user_indexes WHERE idx_scan < 100 AND pg_relation_size(indexrelid) > 1000000 ORDER BY pg_relation_size(indexrelid) DESC"
+```
+
+#### Cache Hit Ratios
+```bash
+# Check cache effectiveness by table
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py "SELECT tablename, heap_blks_read as disk_reads, heap_blks_hit as cache_hits, ROUND(100.0 * heap_blks_hit / NULLIF(heap_blks_hit + heap_blks_read, 0), 2) AS cache_hit_ratio FROM pg_statio_user_tables WHERE heap_blks_read > 0 ORDER BY heap_blks_read DESC LIMIT 20"
+```
+
+#### Connection Pool Health
+```bash
+# Monitor connection states
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py "SELECT state, COUNT(*) as connections, MAX(now() - state_change) as longest_in_state FROM pg_stat_activity GROUP BY state ORDER BY connections DESC"
+
+# Long-running transactions blocking others
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py "SELECT pid, now() - xact_start AS tx_duration, state, LEFT(query, 50) as query_preview FROM pg_stat_activity WHERE xact_start IS NOT NULL AND now() - xact_start > interval '1 minute' ORDER BY tx_duration DESC"
+```
+
 ## Common Query Examples
 
 ### User Information
@@ -537,6 +645,7 @@ WHERE ui.created_at > (NOW() - INTERVAL '7 days')
 ORDER BY ui.created_at DESC
 ```
 
+
 ### Build Status Analytics
 ```sql
 -- Repository build status overview
@@ -557,8 +666,6 @@ WHERE rb.is_active = true
 AND (rb.num_docs_parsing > 100 OR rb.num_docs_encode_and_feeding > 100)
 ORDER BY (rb.num_docs_parsing + rb.num_docs_encode_and_feeding) DESC
 ```
-
-
 
 ## Tool Features
 

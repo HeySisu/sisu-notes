@@ -42,6 +42,14 @@ Query metrics, logs, and APM traces from Datadog. API keys in `tools/config.py`.
 # Database performance
 .venv/bin/python tools/datadog_explorer.py "avg:postgresql.connections{*}"
 .venv/bin/python tools/datadog_explorer.py "avg:postgresql.query.time{*}"
+.venv/bin/python tools/datadog_explorer.py "avg:postgresql.max_connections{*}"
+.venv/bin/python tools/datadog_explorer.py "avg:postgresql.percent_usage_connections{*}"
+
+# Database trace metrics (APM)
+.venv/bin/python tools/datadog_explorer.py "avg:trace.postgres.connect{*}"
+.venv/bin/python tools/datadog_explorer.py "avg:trace.postgres.query.time{*}"
+.venv/bin/python tools/datadog_explorer.py "percentile:trace.postgres.query.time{*}:95"
+.venv/bin/python tools/datadog_explorer.py "avg:trace.postgres.query.rows{*}"
 
 # API latency
 .venv/bin/python tools/datadog_explorer.py "avg:trace.request.duration{service:hebbia-api}"
@@ -93,6 +101,30 @@ Query metrics, logs, and APM traces from Datadog. API keys in `tools/config.py`.
 - Minutes: `5m`, `15m`, `30m`
 - Hours: `1h` (default), `2h`, `4h`, `8h`, `12h`
 - Days: `1d`, `2d`, `7d`, `14d`, `30d`
+
+## Database Connection Analysis
+
+### PostgreSQL Metrics
+```bash
+# Connection pool usage
+.venv/bin/python tools/datadog_explorer.py "avg:postgresql.connections{*}" --timeframe 2h
+.venv/bin/python tools/datadog_explorer.py "max:postgresql.connections{*}" --timeframe 2h
+.venv/bin/python tools/datadog_explorer.py "avg:postgresql.percent_usage_connections{*}" --timeframe 2h
+
+# Connection performance (from APM traces)
+.venv/bin/python tools/datadog_explorer.py "avg:trace.postgres.connect{*}" --timeframe 2h
+.venv/bin/python tools/datadog_explorer.py "max:trace.postgres.connect{*}" --timeframe 2h
+.venv/bin/python tools/datadog_explorer.py "percentile:trace.postgres.connect{*}:95" --timeframe 2h
+
+# Query performance
+.venv/bin/python tools/datadog_explorer.py "avg:trace.postgres.query.time{*}" --timeframe 2h
+.venv/bin/python tools/datadog_explorer.py "percentile:trace.postgres.query.time{*}:95" --timeframe 2h
+.venv/bin/python tools/datadog_explorer.py "percentile:trace.postgres.query.time{*}:99" --timeframe 2h
+
+# Connection analysis with filters
+.venv/bin/python tools/datadog_explorer.py "avg:postgresql.connections{env:prod}" --timeframe 1h
+.venv/bin/python tools/datadog_explorer.py "avg:trace.postgres.connect{env:prod,service:sheets}" --timeframe 1h
+```
 
 ## Analysis Patterns
 
@@ -149,6 +181,11 @@ ddlogs "logs:service:sheets status:error" --timeframe 15m
 
 # Database load
 ddlogs "avg:postgresql.connections{*}" --timeframe 1h
+ddlogs "avg:postgresql.percent_usage_connections{*}" --timeframe 1h
+
+# Database performance (APM traces)
+ddlogs "avg:trace.postgres.connect{*}" --timeframe 1h
+ddlogs "percentile:trace.postgres.query.time{*}:95" --timeframe 1h
 
 # API latency
 ddlogs "percentile:trace.request.duration{service:sheets}:95" --timeframe 1h

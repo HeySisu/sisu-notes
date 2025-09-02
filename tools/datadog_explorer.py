@@ -307,8 +307,19 @@ def main():
 📊 METRICS:
   avg:system.cpu.idle{*}                                     # CPU usage
   avg:postgresql.connections{*}                              # DB connections
+  avg:postgresql.percent_usage_connections{*}                # Connection pool usage %
+  avg:trace.postgres.connect{*}                              # DB connection time (APM)
+  percentile:trace.postgres.query.time{*}:95                 # P95 query time
   avg:trace.request.duration{service:hebbia-api}             # API latency
   percentile:trace.request.duration{service:sheets}:95       # P95 latency
+
+🐘 POSTGRESQL METRICS:
+  avg:postgresql.connections{*}                              # Active connections
+  avg:postgresql.max_connections{*}                          # Max connections allowed
+  avg:postgresql.percent_usage_connections{*}                # Connection pool usage %
+  avg:trace.postgres.connect{*}                              # Connection time (APM)
+  avg:trace.postgres.query.time{*}                           # Query execution time
+  avg:trace.postgres.query.rows{*}                           # Rows returned
 
 📝 LOGS (prefix with 'logs:'):
   logs:run_get_rows_db_queries                               # Performance logs
@@ -318,7 +329,7 @@ def main():
 🔍 DISCOVERY:
   list-metrics                                                # List all metrics
   list-metrics --search postgres                             # Find specific metrics
-  info:system.cpu.idle                                       # Metric metadata
+  info:postgresql.connections                                # Metric metadata
 
 📊 RAW OUTPUT (for analysis):
   --raw                                                       # JSON output for jq/awk
