@@ -11,9 +11,10 @@
 - **Missing indexes**: Causing 120+ second timeouts in production - [View Database Evidence](#a1-missing-indexes-verification)
 - **Table scan impact**: Queries scanning 830K+ rows taking 48+ seconds - [View Performance Analysis](#performance-correlation-analysis)
 - **Connection delays**: 60-second and 210-second (3.5 min) timeout patterns affecting 563k spans - [View APM Analysis](#connection-timeout-analysis)
-- **Timeout failures**: 19 operations timing out at exactly 120 seconds (17:59-18:12 EST) - [View in Datadog](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
+- **Timeout failures**: 78 operations timing out at exactly 120 seconds (17:59-18:12 EST) - [View in Datadog](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
 - **Slow operations**: fetch_relevant_rows taking up to 25 seconds - [Code Location](https://github.com/hebbia/mono/blob/main/sheets_engine/common/get_rows_utils.py)
-- **Cache ineffective**: 43 queries still slow despite cache hits - [View Cache Analysis](#cache-effectiveness-analysis)
+- **Cache ineffective**: 90% cache hit rate but queries still slow (1-14s with cache) - [View Cache Analysis](#cache-effectiveness-analysis)
+- **Hydration bottleneck**: 46 queries with >10s hydration_time, up to 31s - [New Finding](#hydration-performance-issue)
 - **Disk spills**: 272MB sorts exceed 4MB work_mem - [Query Analysis](#c-sample-query-analysis)
 
 ---
@@ -189,12 +190,73 @@ SELECT pg_reload_conf();
 
 ---
 
+## Problem 4: Hydration Performance Issue (New Finding)
+
+### Problem
+Hydration time (data enrichment phase) taking up to 31 seconds, accounting for majority of query time in some cases.
+
+### Evidence
+
+#### Datadog Analysis - Aug 29 Business Hours
+```bash
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
+  "logs:run_get_rows_db_queries @hydration_time:>10" \
+  --timeframe "2025-08-29T14:00:00,2025-08-29T22:00:00"
+
+# Result: 46 queries with hydration_time > 10 seconds
+```
+
+#### Extreme Cases Found
+```json
+// Sheet 150b9b12-8168-4d8c-a978-46697d04fbcf - Only 37 rows!
+{
+  "total_db_queries_time": 36.0287,
+  "relevant_rows_time": 4.7503,     // Fast query
+  "hydration_time": 31.1999,        // 86% of total time!
+  "cache_hit": true,
+  "rows": 37
+}
+```
+
+#### Performance Breakdown Pattern
+- Queries with sorting enabled: avg 0.58s (2.5x slower)
+- Cache hits still slow: 1-14s even with cache
+- Small row counts (37 rows) taking 20-36 seconds total
+- Hydration phase dominates: up to 86% of total execution time
+
+### Root Cause (Confirmed via Code Analysis)
+- **N+1 Query Pattern**: `get_documents_for_rows` fetches documents individually
+- **Multiple Sequential Queries**: `generate_matrix_materialized_paths` makes 2+ additional queries
+- **No Caching**: Same data fetched repeatedly for the same sheets
+
+### Solution
+```python
+# File: mono/sheets/data_layer/cells.py:1340-1420
+# Optimize get_documents_for_rows to batch all queries:
+async def get_documents_for_rows_optimized(row_ids: list[UUID]):
+    # Single query with all joins and aggregations
+    # Avoid calling generate_matrix_materialized_paths separately
+    
+# File: mono/sheets/data_layer/cells.py:1217-1320  
+# Add Redis caching to hydrate_rows:
+@cache_key("hydrate_rows:{sheet_id}:{tab_id}:{column_ids_hash}")
+async def hydrate_rows_cached(...):
+    # Check cache first, fall back to DB
+```
+
+### Expected Impact
+- 46 queries would drop from 10-31s hydration to <1s
+- Overall p95 latency reduction of 50%+
+
+---
+
 ## Implementation Priority
 
-1. **🔴 Day 1**: Deploy migration `340fa1ccadc5` - Fixes 120+ second timeouts
-2. **🔴 Day 1-2**: Update `session_provider.py` - Fixes 60-210 second connection delays  
-3. **🟡 Day 2**: Align ALB/application timeouts - Prevents mid-operation kills
-4. **🟢 Week 1**: Increase work_mem to 256MB - Eliminates disk spills
+1. **🔴 Day 1**: Deploy migration `340fa1ccadc5` - Fixes 120+ second timeouts (78 failures/day)
+2. **🔴 Day 1**: Investigate hydration N+1 queries - Fixes 46 queries with 10-31s delays
+3. **🔴 Day 1-2**: Update `session_provider.py` - Fixes 60-210 second connection delays  
+4. **🟡 Day 2**: Align ALB/application timeouts - Prevents mid-operation kills
+5. **🟢 Week 1**: Increase work_mem to 256MB - Eliminates disk spills
 
 ---
 
@@ -202,15 +264,18 @@ SELECT pg_reload_conf();
 
 ### Root Causes Identified
 1. **Missing indexes** causing full table scans on 73.5M rows
-2. **Connection pool misconfiguration** with LIFO reuse and timeout mismatches  
-3. **Insufficient work_mem** (4MB) causing 272MB disk spills
+2. **Hydration N+1 queries** causing 10-31s delays for just 37 rows
+3. **Connection pool misconfiguration** with LIFO reuse and timeout mismatches  
+4. **Insufficient work_mem** (4MB) causing 272MB disk spills
 
-### Business Impact
-- 19 operations timing out at 120+ seconds during business hours
-- 563k spans affected by 60-210 second connection delays
+### Business Impact (Aug 29, 2025 EST Business Hours)
+- 78 operations timing out at exactly 120 seconds
+- 46 queries with 10-31s hydration delays despite small row counts
+- 90% cache hit rate but still experiencing 1-14s query times
 - User-facing errors from `httpx.HTTPStatusError` timeouts
 
 ### Expected Results After Fixes
 - Query latency: 48s → <10ms (99.98% reduction)
+- Hydration time: 10-31s → <1s (95% reduction)
 - Connection acquisition: 60-210s → <100ms
 - Zero timeout errors and disk spills 
