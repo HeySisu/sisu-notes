@@ -25,16 +25,31 @@ This report identifies four critical performance issues affecting the `get_rows`
 ## Problem 1: Connection Pool Misconfigurations
 
 ### Problem
-Multiple timeout misconfigurations between SQLAlchemy, RDS Proxy, and ALB cause connection delays and 120-second hangs:
-1. **Idle timeout mismatch**: RDS Proxy kills idle connections after 30 minutes, but SQLAlchemy's pool_recycle is set to 3600 seconds (1 hour)
-2. **Borrow timeout too high**: RDS Proxy waits 120 seconds when no connections available (should fail fast)
-3. **LIFO pooling**: Same 5 connections reused while others sit idle and expire
+Multiple timeout misconfigurations between SQLAlchemy, RDS Proxy, ALB, and AsyncPG cause connection delays and timeouts at 60s, 120s, and 336s:
+1. **AsyncPG default timeout**: AsyncPG uses a hardcoded 60-second connection timeout when pool exhausted
+2. **Idle timeout mismatch**: RDS Proxy kills idle connections after 30 minutes, but SQLAlchemy's pool_recycle is set to 3600 seconds (1 hour)
+3. **Borrow timeout too high**: RDS Proxy waits 120 seconds when no connections available (should fail fast)
+4. **LIFO pooling**: Same 5 connections reused while others sit idle and expire
+5. **Graph worker scaling**: October 2024 refactoring + November scaling created connection exhaustion
 
 ### Evidence
-- 78 operations timing out at exactly 120 seconds (matches ConnectionBorrowTimeout)
+- **60-second timeouts (frequent)**: AsyncPG's default when pool exhausted - affecting majority of connection failures
+- **120-second timeouts**: 78 operations timing out at exactly 120 seconds (matches ConnectionBorrowTimeout)
+- **336-second timeouts (rare)**: Compound timeout from ALB (300s) + retry logic (36s) - seen once per week
 - 563k spans experiencing 60-second and 210-second delays
 - Connection establishment taking 15-210 seconds in production
 - AWS CloudWatch shows DatabaseConnectionsBorrowLatency spikes of 13-26ms
+
+### Root Cause Timeline
+**October 31, 2024**: Graph worker refactoring introduced separate connection pools:
+- Created dual pools: core DB + sheets jobs DB per worker
+- Each graph worker now uses: 2 sync + 5 async connections × 2 DBs = 14 connections/worker
+
+**November 22, 2024**: Infrastructure scaling amplified connection demand:
+- Task workers: scaled from 5 to 20 nodes (4× increase)
+- Graph workers: scaled from 3 to 5 nodes (1.67× increase)
+- Total connection demand: (5 graph × 14) + (20 task × ~10) = 270+ connections
+- Available capacity exceeded, triggering AsyncPG's 60-second default timeout
 
 ### Solutions Required
 
@@ -53,18 +68,32 @@ connection_borrow_timeout = 30    # Fail fast at 30 seconds
 pool_recycle=3600          # 1 hour - exceeds RDS Proxy timeout!
 pool_use_lifo=True         # Same connections reused repeatedly
 pool_timeout=None          # Defaults to 30 seconds
+connect_timeout=None       # AsyncPG defaults to 60 seconds!
 
 # Required Fix
 pool_recycle=1500          # 25 min - less than RDS Proxy's 30 min
 pool_use_lifo=False        # FIFO - rotate all connections
 pool_pre_ping=True         # Test connections before use
 pool_timeout=30.0          # Match RDS Proxy's ConnectionBorrowTimeout
+connect_timeout=30         # Override AsyncPG's 60s default to match pool_timeout
+```
+
+#### C. AsyncPG Connection Timeout (configs.py)
+```python
+# Current Configuration in PostgresDbConfig
+connect_timeout_secs: Optional[int] = None  # Defaults to AsyncPG's 60 seconds
+
+# Required Fix
+connect_timeout_secs: int = 30  # Explicit 30-second timeout to fail fast
 ```
 
 ### Expected Impact
+- **60-second timeouts**: Eliminated by setting explicit 30s connect_timeout
+- **120-second timeouts**: Reduced to 30s max via ConnectionBorrowTimeout fix
+- **336-second timeouts**: Prevented by proper timeout alignment across stack
 - Connection acquisition: <100ms (current: 60-210 seconds)
-- Eliminate 120-second timeout hangs (reduced to 30s max)
 - Prevent stale connection reuse issues
+- Graph worker connection demand: Better managed with proper pool sizing
 
 ---
 
@@ -235,34 +264,44 @@ async def hydrate_rows_cached(...):
 ## Implementation Priority
 
 ### Immediate Actions (Day 1)
-1. **Deploy database indexes** (migration `340fa1ccadc5`) - Eliminates 48-second table scans
-2. **Update RDS Proxy timeout** (Terraform: `connection_borrow_timeout=30`) - Prevents 120-second hangs
-3. **Fix SQLAlchemy configuration** (`session_provider.py`) - Resolves connection pool issues
+1. **Set AsyncPG timeout** (`configs.py`: `connect_timeout_secs=30`) - Eliminates 60-second hangs
+2. **Deploy database indexes** (migration `340fa1ccadc5`) - Eliminates 48-second table scans
+3. **Update RDS Proxy timeout** (Terraform: `connection_borrow_timeout=30`) - Prevents 120-second hangs
+4. **Fix SQLAlchemy configuration** (`session_provider.py`) - Resolves connection pool issues
 
 ### Short-term (Week 1)
-4. **Optimize hydration queries** - Fix N+1 pattern causing 31-second delays
-5. **Increase work_mem to 256MB** - Eliminate disk spills
+5. **Optimize hydration queries** - Fix N+1 pattern causing 31-second delays
+6. **Increase work_mem to 256MB** - Eliminate disk spills
+7. **Scale graph worker pools** - Increase from 2/5 to 10/20 connections per worker
 
 ### Medium-term (Week 2)
-6. **Align ALB/application timeouts** - Prevent mid-operation connection kills
+8. **Align ALB/application timeouts** - Prevent mid-operation connection kills
+9. **Monitor connection pool metrics** - Add alerting for pool exhaustion events
 
 ---
 
 ## Summary
 
 ### Root Causes Identified
-1. **Missing database indexes** - Full table scans on 73.5M rows
-2. **Connection pool misconfigurations** - Timeout mismatches between SQLAlchemy and RDS Proxy
-3. **N+1 query patterns** - Hydration phase fetching documents individually  
-4. **Insufficient work_mem** - 4MB limit forcing 272MB sorts to disk
+1. **AsyncPG default timeout** - 60-second hardcoded timeout when connection pool exhausted
+2. **Missing database indexes** - Full table scans on 73.5M rows
+3. **Connection pool misconfigurations** - Timeout mismatches between SQLAlchemy, AsyncPG, and RDS Proxy
+4. **Graph worker scaling** - October refactoring + November scaling created 270+ connection demand
+5. **N+1 query patterns** - Hydration phase fetching documents individually  
+6. **Insufficient work_mem** - 4MB limit forcing 272MB sorts to disk
 
 ### Current Production Impact
-- 78 operations timing out at 120 seconds daily
+- **60-second timeouts**: Most frequent issue from AsyncPG defaults under pool exhaustion
+- **120-second timeouts**: 78 operations timing out daily from RDS Proxy ConnectionBorrowTimeout
+- **336-second timeouts**: Rare compound timeouts from ALB (300s) + retry logic (36s)
 - 46 queries taking 10-31 seconds for hydration alone
 - 563k spans experiencing 60-210 second connection delays
 - 90% cache hit rate but queries still taking 1-14 seconds
 
 ### Expected Improvements After Implementation
+- **60-second timeouts**: Eliminated via explicit AsyncPG timeout configuration
+- **120-second timeouts**: Reduced to manageable 30s via RDS Proxy fix
+- **336-second timeouts**: Prevented through proper timeout alignment
 - Query latency: 48s → <10ms (99.98% reduction)
 - Hydration time: 10-31s → <1s (95% reduction)
 - Connection acquisition: 60-210s → <100ms
