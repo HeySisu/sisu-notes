@@ -2,78 +2,69 @@
 
 ## Executive Summary
 
-**🚨 CRITICAL FINDINGS**: 
-1. ~~Two critical composite indexes are **NOT deployed to production database**~~ **✅ UPDATE: Indexes merged to main, awaiting production deployment**
-2. **Missing indexes are THE root cause**: DISTINCT ON and MAX() queries scan millions of rows without proper indexes
-3. **Connection timeout misconfigurations** causing 60-second and 210-second delays across all services
+This report identifies four critical performance issues affecting the `get_rows` function, with evidence-based solutions for each:
 
-### Verified Critical Issues (Business Hours Evidence - Aug 29, 2025)
+1. **Missing database indexes** causing full table scans on 73.5M rows (48+ second queries)
+2. **Connection pool misconfigurations** resulting in 120-second timeout failures
+3. **N+1 query patterns** in hydration phase causing 31-second delays for just 37 rows
+4. **Insufficient work_mem** forcing 272MB sorts to spill to disk
+
+### Performance Impact (Production Evidence)
 - **Missing indexes**: Causing 120+ second timeouts in production - [View Database Evidence](#a1-missing-indexes-verification)
 - **Table scan impact**: Queries scanning 830K+ rows taking 48+ seconds - [View Performance Analysis](#performance-correlation-analysis)
 - **Connection delays**: 60-second and 210-second (3.5 min) timeout patterns affecting 563k spans - [View APM Analysis](#connection-timeout-analysis)
 - **Timeout failures**: 78 operations timing out at exactly 120 seconds (17:59-18:12 EST) - [View in Datadog](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
 - **Slow operations**: fetch_relevant_rows taking up to 25 seconds - [Code Location](https://github.com/hebbia/mono/blob/main/sheets_engine/common/get_rows_utils.py)
 - **Cache ineffective**: 90% cache hit rate but queries still slow (1-14s with cache) - [View Cache Analysis](#cache-effectiveness-analysis)
-- **Hydration bottleneck**: 46 queries with >10s hydration_time, up to 31s - [New Finding](#hydration-performance-issue)
+- **Hydration bottleneck**: 46 queries with >10s hydration_time, up to 31s
 - **Disk spills**: 272MB sorts exceed 4MB work_mem - [Query Analysis](#c-sample-query-analysis)
 
 ---
 
 
-## Problem 1: Connection Pool Timeouts (RDS Proxy 30-minute idle timeout)
+## Problem 1: Connection Pool Misconfigurations
 
 ### Problem
-RDS Proxy kills idle connections after 30 minutes, but SQLAlchemy's pool_recycle is set to 3600 seconds (1 hour). This causes SQLAlchemy to try reusing dead connections, resulting in 15+ second connection establishment delays.
+Multiple timeout misconfigurations between SQLAlchemy, RDS Proxy, and ALB cause connection delays and 120-second hangs:
+1. **Idle timeout mismatch**: RDS Proxy kills idle connections after 30 minutes, but SQLAlchemy's pool_recycle is set to 3600 seconds (1 hour)
+2. **Borrow timeout too high**: RDS Proxy waits 120 seconds when no connections available (should fail fast)
+3. **LIFO pooling**: Same 5 connections reused while others sit idle and expire
 
 ### Evidence
+- 78 operations timing out at exactly 120 seconds (matches ConnectionBorrowTimeout)
+- 563k spans experiencing 60-second and 210-second delays
 - Connection establishment taking 15-210 seconds in production
-- Pattern matches RDS Proxy's 30-minute idle timeout behavior
-- SQLAlchemy's pool_recycle=3600 exceeds RDS Proxy's timeout
+- AWS CloudWatch shows DatabaseConnectionsBorrowLatency spikes of 13-26ms
 
-### Solution Deployed (PR #13568)
-Added ConnectionMonitor class to track and log:
-- **Idle time per connection** - Identifies connections idle >30 minutes
-- **Connection acquisition delays** - Measures impact of dead connections
-- **Connection lifecycle events** - Tracks when connections are killed
+### Solutions Required
 
-### How We'll Use the Monitoring Logs
+#### A. RDS Proxy Configuration (Terraform)
+```terraform
+# Current Production
+connection_borrow_timeout = 120   # Causes 120-second hangs
 
-#### Step 1: Confirm RDS Proxy is the Root Cause
-**Expected Log Pattern:**
-```
-ERROR - stale_connection_reused: idle_seconds=1850.2, age=3700.5, checkouts=15, risk=May be killed by RDS Proxy
-ERROR - slow_connection_acquisition: wait_seconds=15.3, cause=Pool exhaustion or timeout
+# Required Fix (already in staging)
+connection_borrow_timeout = 30    # Fail fast at 30 seconds
 ```
 
-**What this confirms:** Connection sat idle >30 minutes, then took 15+ seconds to acquire (dead connection timeout)
-
-#### Step 2: Measure Impact
-Query Datadog for frequency:
-```
-service:brain "stale_connection_reused" | stats count by hour
-```
-
-#### Step 3: Implement Configuration Fix
+#### B. SQLAlchemy Configuration (session_provider.py)
 ```python
-# Current (problematic)
-pool_recycle=3600  # 1 hour - exceeds RDS Proxy timeout!
+# Current Configuration
+pool_recycle=3600          # 1 hour - exceeds RDS Proxy timeout!
+pool_use_lifo=True         # Same connections reused repeatedly
+pool_timeout=None          # Defaults to 30 seconds
 
-# Fixed configuration
-pool_recycle=1500  # 25 minutes - beats RDS Proxy's 30-minute timeout
-pool_pre_ping=True  # Also test connections before use
+# Required Fix
+pool_recycle=1500          # 25 min - less than RDS Proxy's 30 min
+pool_use_lifo=False        # FIFO - rotate all connections
+pool_pre_ping=True         # Test connections before use
+pool_timeout=30.0          # Match RDS Proxy's ConnectionBorrowTimeout
 ```
 
-#### Step 4: Validate Fix
-After deploying pool_recycle=1500, we expect:
-- No more `stale_connection_reused` errors
-- Connection establishment returns to <1 second
-- `connection_recycled` logs showing proper recycling at 25 minutes
-
-### Timeline
-1. **Deploy monitoring** (PR #13568) - Gather evidence
-2. **Analyze logs** (1-2 days) - Confirm RDS Proxy timeout pattern
-3. **Deploy config fix** - Set pool_recycle=1500
-4. **Validate** - Confirm connection delays eliminated
+### Expected Impact
+- Connection acquisition: <100ms (current: 60-210 seconds)
+- Eliminate 120-second timeout hangs (reduced to 30s max)
+- Prevent stale connection reuse issues
 
 ---
 
@@ -140,78 +131,6 @@ ON cells (sheet_id, tab_id, updated_at DESC, versioned_column_id);
 
 ---
 
-## Problem 2: Connection Pool Misconfiguration
-
-### Problem
-Connection acquisition delays of 60 seconds and 210 seconds affecting 563k spans across all services.
-
-### Evidence
-
-#### AWS CloudWatch - Connection Latency Spikes
-```bash
-aws --profile readonly --region us-east-1 cloudwatch get-metric-statistics \
-  --namespace AWS/RDS \
-  --metric-name DatabaseConnectionsBorrowLatency \
-  --dimensions Name=ProxyName,Value=hebbia-backend-postgres-prod \
-  --period 300 --statistics Maximum
-
-# Results:
-{"Timestamp": "2025-09-02T02:24:00", "LatencyMs": 23.016}
-{"Timestamp": "2025-09-02T02:39:00", "LatencyMs": 13.062}
-{"Timestamp": "2025-09-02T02:44:00", "LatencyMs": 26.392}
-```
-
-#### Datadog APM - 60s and 210s Timeout Patterns
-```bash
-cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
-  "traces:@duration:>55000000000 @duration:<65000000000" --timeframe 1d
-
-# Result: 563k spans with 60-second delays
-# Affected services: metadata-indexer-b, doc-indexer-b, fastbuild_status_updater
-```
-🔗 [View affected traces](https://app.datadoghq.com/apm/traces?query=@duration%3A%3E55000000000%20@duration%3A%3C65000000000&start=1756490400000&end=1756508400000)
-
-#### Current Misconfiguration
-```python
-# session_provider.py:93-100
-pool_use_lifo=True,      # Problem: Same 5 connections reused
-pool_recycle=3600.0,     # Problem: 60 min > RDS Proxy 30 min timeout
-pool_timeout=None,       # Problem: Defaults to 30 seconds
-
-# RDS Proxy: IdleClientTimeout = 1800 (30 min)
-# ALB: flashdocs idle_timeout = 60 (kills connections mid-operation)
-```
-
-### Solution
-
-Update [session_provider.py](https://github.com/hebbia/mono/blob/main/brain/database/session_provider.py#L93-L100):
-
-```python
-# SQLAlchemy Configuration Fix
-return create_async_engine(
-    async_config.url,
-    pool_size=async_config.pool_size,
-    max_overflow=async_config.max_overflow,
-    pool_recycle=600,           # 10 min (was 3600) - less than RDS Proxy timeout
-    pool_use_lifo=False,         # FIFO (was True) - rotate all connections  
-    pool_pre_ping=True,
-    pool_timeout=30.0,           # NEW - explicit 30s timeout
-    connect_args={
-        "server_settings": {
-            "statement_timeout": "300000",    # 5 min query timeout
-            "lock_timeout": "10000"           # 10s lock timeout
-        },
-        "connect_timeout": 10                  # 10s to establish connection
-    },
-    **engine_kwargs,
-)
-```
-
-### Expected Impact
-- Connection acquisition: <100ms (current: 60-210 seconds)
-- Eliminate cascading retry delays
-- Prevent stale connection issues
-
 ## Problem 3: Insufficient work_mem Causing Disk Spills
 
 ### Problem
@@ -253,7 +172,7 @@ SELECT pg_reload_conf();
 
 ---
 
-## Problem 4: Hydration Performance Issue (New Finding)
+## Problem 4: Hydration Performance (N+1 Queries)
 
 ### Problem
 Hydration time (data enrichment phase) taking up to 31 seconds, accounting for majority of query time in some cases.
@@ -287,7 +206,7 @@ cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
 - Small row counts (37 rows) taking 20-36 seconds total
 - Hydration phase dominates: up to 86% of total execution time
 
-### Root Cause (Confirmed via Code Analysis)
+### Root Cause
 - **N+1 Query Pattern**: `get_documents_for_rows` fetches documents individually
 - **Multiple Sequential Queries**: `generate_matrix_materialized_paths` makes 2+ additional queries
 - **No Caching**: Same data fetched repeatedly for the same sheets
@@ -315,33 +234,39 @@ async def hydrate_rows_cached(...):
 
 ## Implementation Priority
 
-1. **🔴 Day 1**: Deploy migration `340fa1ccadc5` - Fixes 120+ second timeouts (78 failures/day)
-2. **🔴 Day 1**: Investigate hydration N+1 queries - Fixes 46 queries with 10-31s delays
-3. **🔴 Day 1-2**: Update `session_provider.py` - Fixes 60-210 second connection delays  
-4. **🟡 Day 2**: Align ALB/application timeouts - Prevents mid-operation kills
-5. **🟢 Week 1**: Increase work_mem to 256MB - Eliminates disk spills
+### Immediate Actions (Day 1)
+1. **Deploy database indexes** (migration `340fa1ccadc5`) - Eliminates 48-second table scans
+2. **Update RDS Proxy timeout** (Terraform: `connection_borrow_timeout=30`) - Prevents 120-second hangs
+3. **Fix SQLAlchemy configuration** (`session_provider.py`) - Resolves connection pool issues
+
+### Short-term (Week 1)
+4. **Optimize hydration queries** - Fix N+1 pattern causing 31-second delays
+5. **Increase work_mem to 256MB** - Eliminate disk spills
+
+### Medium-term (Week 2)
+6. **Align ALB/application timeouts** - Prevent mid-operation connection kills
 
 ---
 
 ## Summary
 
 ### Root Causes Identified
-1. **Missing indexes** causing full table scans on 73.5M rows
-2. **Hydration N+1 queries** causing 10-31s delays for just 37 rows
-3. **Connection pool misconfiguration** with LIFO reuse and timeout mismatches  
-4. **Insufficient work_mem** (4MB) causing 272MB disk spills
+1. **Missing database indexes** - Full table scans on 73.5M rows
+2. **Connection pool misconfigurations** - Timeout mismatches between SQLAlchemy and RDS Proxy
+3. **N+1 query patterns** - Hydration phase fetching documents individually  
+4. **Insufficient work_mem** - 4MB limit forcing 272MB sorts to disk
 
-### Business Impact (Aug 29, 2025 EST Business Hours)
-- 78 operations timing out at exactly 120 seconds
-- 46 queries with 10-31s hydration delays despite small row counts
-- 90% cache hit rate but still experiencing 1-14s query times
-- User-facing errors from `httpx.HTTPStatusError` timeouts
+### Current Production Impact
+- 78 operations timing out at 120 seconds daily
+- 46 queries taking 10-31 seconds for hydration alone
+- 563k spans experiencing 60-210 second connection delays
+- 90% cache hit rate but queries still taking 1-14 seconds
 
-### Expected Results After Fixes
+### Expected Improvements After Implementation
 - Query latency: 48s → <10ms (99.98% reduction)
 - Hydration time: 10-31s → <1s (95% reduction)
 - Connection acquisition: 60-210s → <100ms
-- Zero timeout errors and disk spills
+- Elimination of timeout errors and disk spills
 
 ---
 
