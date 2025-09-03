@@ -350,6 +350,43 @@ echo "Slow queries WITHOUT pagination:"
 .venv/bin/python tools/datadog_explorer.py "logs:\"Failed to parse\"" --timeframe 1h
 ```
 
+## 🔍 N+1 Query Investigation
+
+### Finding N+1 Query Patterns
+N+1 queries are best identified through log events with high `hydration_time` relative to `relevant_rows_time`.
+
+```bash
+# Find events with high hydration time (N+1 pattern indicator)
+.venv/bin/python tools/datadog_explorer.py "logs:run_get_rows_db_queries @hydration_time:>10" --timeframe 24h --event-urls
+
+# Compare hydration vs query time
+.venv/bin/python tools/datadog_explorer.py "logs:run_get_rows_db_queries" --raw | \
+  jq -r '.data[] | select(.attributes.attributes.hydration_time > (.attributes.attributes.relevant_rows_time * 2)) | 
+    {sheet: .attributes.attributes.sheet, 
+     rows: .attributes.attributes.total_row_count,
+     query_time: .attributes.attributes.relevant_rows_time,
+     hydration_time: .attributes.attributes.hydration_time,
+     ratio: (.attributes.attributes.hydration_time / .attributes.attributes.relevant_rows_time)}'
+
+# Example N+1 pattern: Sheet 150b9b12-8168-4d8c-a978-46697d04fbcf
+# - 37 rows taking 36 seconds total
+# - Query time: 4.77s (cached)
+# - Hydration time: 31.08s (86% of total!)
+# - This indicates ~1 second per row for hydration (classic N+1)
+```
+
+### Key Indicators of N+1 Problems
+- **hydration_time >> relevant_rows_time**: Hydration taking 5-10x longer than query
+- **Small row counts with high total time**: 37 rows taking 36 seconds
+- **Cache hit but still slow**: Cache helps main query but not N+1 hydration queries
+- **Per-row timing patterns**: Total time ÷ row count ≈ 0.5-1s suggests individual queries
+
+### Better Than APM Traces
+- **Log events are more reliable**: APM traces often show "not available"
+- **Event URLs persist longer**: Direct links to log events remain accessible
+- **Attributes provide context**: hydration_time, cache_hit, row counts all visible
+- **No sampling issues**: All performance logs are captured, unlike traces
+
 ## 🔬 Viewing Full Traces and SQL Queries
 
 ### Finding Events with SQL Query Details
@@ -509,8 +546,12 @@ ddlogs "logs:error" --raw
 - **Trace Details**: The API cannot retrieve the detailed breakdown shown in flamegraph view
   - SQL query text, execution plans, and detailed timings require web UI access
   - Trace IDs from logs often don't link properly to APM traces via API
+  - **APM Trace URLs often show "trace is not available"** - traces are sampled and may expire
 - **Metric Names**: PostgreSQL connection metrics not available via standard trace metrics
 - **Connection Logs**: SQLAlchemy/psycopg2 connection timing not logged by default
+- **N+1 Query Patterns**: Best identified through log event attributes like `hydration_time`
+  - Look for high hydration_time relative to relevant_rows_time
+  - Log events are more reliable than trace URLs for investigating N+1 issues
 
 ### Working Alternatives
 - Use AWS CloudWatch for RDS Proxy metrics instead of Datadog APM
