@@ -73,6 +73,16 @@ https://app.datadoghq.com/metric/explorer?from_ts=[SEC]&to_ts=[SEC]&live=true&qu
 # Count occurrences of specific log patterns
 .venv/bin/python tools/datadog_explorer.py "logs:\"slow get_relevant_rows query\"" --timeframe 24h --raw | \
   jq -r '.data | length'  # Returns up to 100 (API limit)
+
+# Advanced performance queries with cache hits and slow relevant_rows
+.venv/bin/python tools/datadog_explorer.py "logs:env:prod run_get_rows_db_queries performance @cache_hit:true @relevant_rows_time:>5" --timeframe 1d
+
+# Get event URLs for detailed trace viewing
+.venv/bin/python tools/datadog_explorer.py "logs:env:prod run_get_rows_db_queries @relevant_rows_time:>5" --event-urls
+
+# Extract trace IDs and event details for SQL analysis
+.venv/bin/python tools/datadog_explorer.py "logs:env:prod run_get_rows_db_queries @relevant_rows_time:>5" --raw | \
+  jq -r '.data[0:10] | .[] | {id: .id, timestamp: .attributes.timestamp, relevant_rows_time: .attributes.attributes.relevant_rows_time, trace_id: .attributes.attributes.dd.trace_id}'
 ```
 
 ### 📝 Log Queries
@@ -225,7 +235,91 @@ https://app.datadoghq.com/metric/explorer?from_ts=[SEC]&to_ts=[SEC]&live=true&qu
 
 ## Analysis Patterns
 
+### 🔍 Systematic Performance Investigation Method
+
+**The 4-Step Investigation Pattern**:
+1. **Look at the code** → Find where logging happens
+2. **Discover attributes** → Extract all logged fields from Datadog
+3. **Experiment with filters** → Try various attribute combinations
+4. **Report insights** → Document correlations and bottlenecks
+
+### Step 1: Find the Logging Code
+
+**Example Source**: `mono/sheets/cortex/ssrm/get_rows_utils.py`
+```python
+# Look for logging patterns like:
+logger.info("run_get_rows_db_queries performance", extra={
+    "cache_hit": cache_hit,
+    "relevant_rows_time": relevant_rows_time,
+    "total_db_queries_time": total_time,
+    "matrix_size_category": matrix_category,
+    # ... more attributes
+})
+```
+
+### Step 2: Discover All Available Attributes
+
+```bash
+# Extract all logged attributes from any log pattern
+.venv/bin/python tools/datadog_explorer.py "logs:run_get_rows_db_queries" --timeframe 1h --raw | \
+  jq -r '.data[0].attributes.attributes | keys[]' | sort
+
+# Common attributes found:
+# cache_hit, cache_total_time, columns_queried
+# filter_count, group_depth, has_filtering, has_group_loading
+# has_grouping, has_pagination, has_sorting, hydration_time
+# is_full_matrix_search, matrix_size_category, matrix_total_columns
+# matrix_total_rows, relevant_rows_time, total_db_queries_time, total_row_count
+```
+
+### Step 3: Experiment with Filter Combinations
+
+```bash
+# Basic performance queries
+.venv/bin/python tools/datadog_explorer.py "logs:run_get_rows_db_queries @total_db_queries_time:>10" --timeframe 1d
+
+# Correlation testing - find what makes queries slow
+.venv/bin/python tools/datadog_explorer.py "logs:run_get_rows_db_queries @has_pagination:true @relevant_rows_time:>5" --timeframe 1d
+.venv/bin/python tools/datadog_explorer.py "logs:run_get_rows_db_queries @has_pagination:false @relevant_rows_time:>5" --timeframe 1d
+
+# Matrix size impact
+.venv/bin/python tools/datadog_explorer.py "logs:run_get_rows_db_queries @matrix_size_category:large @cache_hit:true" --timeframe 1d
+
+# Feature combination impact
+.venv/bin/python tools/datadog_explorer.py "logs:run_get_rows_db_queries @has_grouping:true @has_sorting:true" --timeframe 1d
+
+# Cache effectiveness
+.venv/bin/python tools/datadog_explorer.py "logs:run_get_rows_db_queries @cache_hit:true @relevant_rows_time:>5" --timeframe 1d
+.venv/bin/python tools/datadog_explorer.py "logs:run_get_rows_db_queries @cache_hit:false @relevant_rows_time:>5" --timeframe 1d
+```
+
+### Step 4: Analyze and Report Insights
+
+```bash
+# Count queries by different criteria
+echo "=== Performance Correlation Analysis ==="
+
+# Test hypothesis: pagination causes slowness
+echo "Slow queries WITH pagination:"
+.venv/bin/python tools/datadog_explorer.py "logs:run_get_rows_db_queries @has_pagination:true @relevant_rows_time:>5" --raw | jq '.data | length'
+
+echo "Slow queries WITHOUT pagination:"
+.venv/bin/python tools/datadog_explorer.py "logs:run_get_rows_db_queries @has_pagination:false @relevant_rows_time:>5" --raw | jq '.data | length'
+
+# Distribution analysis
+.venv/bin/python tools/datadog_explorer.py "logs:run_get_rows_db_queries" --timeframe 6h --raw | \
+  jq -r '.data[].attributes.attributes | 
+    {pagination: .has_pagination, time: .relevant_rows_time}' | \
+  jq -s 'group_by(.pagination) | 
+    map({pagination: .[0].pagination, avg_time: (map(.time) | add/length), count: length})'
+```
+
 ### Finding Performance Issues
+
+**Source Code**: Performance logging comes from `mono/sheets/cortex/ssrm/get_rows_utils.py`
+- This module logs detailed query performance metrics
+- Use different filters to find insights from these logs
+
 ```bash
 # Query time distribution
 .venv/bin/python tools/datadog_explorer.py "logs:run_get_rows_db_queries" --timeframe 6h --raw | \
@@ -256,15 +350,106 @@ https://app.datadoghq.com/metric/explorer?from_ts=[SEC]&to_ts=[SEC]&live=true&qu
 .venv/bin/python tools/datadog_explorer.py "logs:\"Failed to parse\"" --timeframe 1h
 ```
 
+## 🔬 Viewing Full Traces and SQL Queries
+
+### Finding Events with SQL Query Details
+```bash
+# Query for slow performance with specific conditions
+.venv/bin/python tools/datadog_explorer.py "logs:env:prod run_get_rows_db_queries performance @cache_hit:true @relevant_rows_time:>5" --timeframe 1d
+
+# Get direct event URLs to view in Datadog UI
+.venv/bin/python tools/datadog_explorer.py "logs:env:prod run_get_rows_db_queries @relevant_rows_time:>5" --event-urls
+
+# The event URLs will take you to the Datadog Logs Explorer where you can:
+# 1. Click on an event to expand it
+# 2. Look for the "Traces" tab in the event details
+# 3. Click "View Trace" to see the full APM trace
+# 4. In the trace view, look for SQL query spans to see actual queries and their execution times
+```
+
+### Analyzing Trace Data
+```bash
+# Find APM traces with long durations
+.venv/bin/python tools/datadog_explorer.py "traces:service:sheets @duration:>5000000000" --timeframe 1d
+
+# Get trace IDs from log events
+.venv/bin/python tools/datadog_explorer.py "logs:env:prod run_get_rows_db_queries @relevant_rows_time:>5" --raw | \
+  jq -r '.data[] | select(.attributes.attributes.dd.trace_id) | .attributes.attributes.dd.trace_id'
+```
+
+### Datadog UI Navigation for SQL Analysis
+1. **From Log Event to Trace**:
+   - Use `--event-urls` to get direct links to log events
+   - Click the event URL to open in Datadog
+   - In event details, click "View Trace" (if available)
+   - Navigate to SQL query spans in the trace flamegraph
+
+2. **Trace View Features**:
+   - Flamegraph shows execution timeline
+   - SQL queries appear as database spans
+   - Click on SQL spans to see:
+     - Full query text
+     - Execution time
+     - Database connection details
+     - Row count returned
+
+3. **Finding Slow SQL Queries**:
+   - Look for database spans with long durations
+   - Check the `db.statement` attribute for the actual SQL
+   - Use the flamegraph to identify query bottlenecks
+
+4. **Direct Trace URL Access**:
+   - Trace URLs follow this format:
+     ```
+     https://app.datadoghq.com/apm/trace/[TRACE_ID]?graphType=flamegraph&spanID=[SPAN_ID]
+     ```
+   - The API cannot retrieve the full flamegraph data shown in the UI
+   - For detailed SQL analysis, you must use the Datadog web UI directly
+
+### Example Event URL Format
+```
+https://app.datadoghq.com/logs?query=env%3Aprod%20run_get_rows_db_queries%20performance%20%40cache_hit%3Atrue
+&event=AwAAAZkKTk_0JFfTIgAAABhBWmtLVGxJWEFBQVpvNVNUYlgtSkZnQUwAAAAkZjE5OTBhNTUtMzZhNS00NTRjLWI5ZWUtNzYwNTM3MTY5YTNhABAqnA
+&agg_m=@relevant_rows_time
+&agg_q=@matrix_size_category
+```
+
 ## Key Findings from Investigation
 
-From analyzing `get_rows` performance:
+From analyzing `get_rows` performance (logged by `mono/sheets/cortex/ssrm/get_rows_utils.py`):
 
 ### Application Logs
 - **10% of queries are critical** (>1 second execution time)
 - **Average DB query time: 0.704s** even with cache hits
 - **Missing indexes** cause 48+ second queries (see final_report.md)
 - **Common errors**: Transaction rollbacks, parse failures
+
+### Performance Correlations (New Insights Using 4-Step Method)
+
+**How these insights were discovered**:
+1. **Looked at code**: Found logging in `mono/sheets/cortex/ssrm/get_rows_utils.py`
+2. **Discovered attributes**: Extracted `has_pagination`, `matrix_size_category`, `has_group_loading`, etc.
+3. **Experimented with filters**: Tested correlations between attributes and slowness
+4. **Reported findings**:
+
+- **Pagination is the key factor**: ALL slow queries (>5s relevant_rows_time) have pagination enabled
+  ```bash
+  # Discovery query that revealed this:
+  @has_pagination:true @relevant_rows_time:>5  # Result: 100 queries
+  @has_pagination:false @relevant_rows_time:>5 # Result: 0 queries
+  ```
+  
+- **Large matrices with cache hits still slow**: Even with cache, large matrix queries take 14-23 seconds
+  ```bash
+  # Discovery query:
+  @matrix_size_category:large @cache_hit:true @relevant_rows_time:>10
+  ```
+  
+- **Group loading contributes to slowness**: 7 queries with group_loading exceed 5s total time
+  ```bash
+  # Discovery query:
+  @has_group_loading:true @total_db_queries_time:>5
+  ```
 
 ### APM Traces (NEW)
 - **_get_relevant_rows_cached**: 2.8-3.1 second operations confirmed
@@ -320,6 +505,10 @@ ddlogs "logs:error" --raw
 - **APM Traces**: Database operations not captured as separate spans in application traces
   - `resource_name:postgres` queries return no results
   - Database timing must be inferred from application-level logs
+  - Full trace flamegraph data (including SQL queries) only available in web UI, not via API
+- **Trace Details**: The API cannot retrieve the detailed breakdown shown in flamegraph view
+  - SQL query text, execution plans, and detailed timings require web UI access
+  - Trace IDs from logs often don't link properly to APM traces via API
 - **Metric Names**: PostgreSQL connection metrics not available via standard trace metrics
 - **Connection Logs**: SQLAlchemy/psycopg2 connection timing not logged by default
 

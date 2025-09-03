@@ -4,227 +4,124 @@
 
 **🚨 CRITICAL FINDINGS**: 
 1. ~~Two critical composite indexes are **NOT deployed to production database**~~ **✅ UPDATE: Indexes merged to main, awaiting production deployment**
-2. **Connection timeout misconfigurations** causing 60-second and 210-second delays across all services
+2. **Missing indexes are THE root cause**: DISTINCT ON and MAX() queries scan millions of rows without proper indexes
+3. **Connection timeout misconfigurations** causing 60-second and 210-second delays across all services
 
 ### Verified Critical Issues (Business Hours Evidence - Aug 29, 2025)
 - **Missing indexes**: Causing 120+ second timeouts in production - [View Database Evidence](#a1-missing-indexes-verification)
+- **Table scan impact**: Queries scanning 830K+ rows taking 48+ seconds - [View Performance Analysis](#performance-correlation-analysis)
 - **Connection delays**: 60-second and 210-second (3.5 min) timeout patterns affecting 563k spans - [View APM Analysis](#connection-timeout-analysis)
 - **Timeout failures**: 19 operations timing out at exactly 120 seconds (17:59-18:12 EST) - [View in Datadog](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
 - **Slow operations**: fetch_relevant_rows taking up to 25 seconds - [Code Location](https://github.com/hebbia/mono/blob/main/sheets_engine/common/get_rows_utils.py)
+- **Cache ineffective**: 43 queries still slow despite cache hits - [View Cache Analysis](#cache-effectiveness-analysis)
 - **Disk spills**: 272MB sorts exceed 4MB work_mem - [Query Analysis](#c-sample-query-analysis)
 
 ---
 
-## Step 0: Performance Logging - ✅ DEPLOYED
 
-**Status**: Complete and operational
+## Problem 1: Missing Database Indexes
 
-Comprehensive metrics tracking deployed at [get_rows_utils.py:L450-L474](https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows_utils.py#L450-L474)
+### Problem
+DISTINCT ON and MAX() queries perform full table scans on 73.5M row table, causing 48+ second queries and 120+ second timeouts.
 
-[View performance logs in Datadog](https://app.datadoghq.com/logs?query=run_get_rows_db_queries&from_ts=1756490400000&to_ts=1756508400000)
+### Evidence
 
-Tracks:
-- Total execution time
-- Database query time  
-- Cache operations
-- Result processing
-- Hydration performance
+#### Database Query Showing Missing Indexes
+```bash
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py --env prod \
+  "SELECT indexname FROM pg_indexes WHERE tablename = 'cells' ORDER BY indexname"
+
+# Result: Only 12 indexes exist (missing 2 critical composite indexes)
+```
+
+#### Datadog Logs - 120+ Second Timeouts
+```bash
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
+  "traces:resource_name:*fetch_relevant_rows* @duration:>120000000000" \
+  --timeframe "2025-08-29T14:00:00,2025-08-29T19:00:00"
+
+# Result: 19 operations timing out at exactly 120 seconds
+```
+🔗 [View timeouts in Datadog](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
+
+#### SQL EXPLAIN Output
+```sql
+-- MAX() query without index
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT MAX(updated_at) FROM cells 
+WHERE sheet_id = '...' AND tab_id = '...';
+
+-- Result:
+Seq Scan on cells (actual time=0.032..47234.123 rows=830518)
+Rows Removed by Filter: 157404049
+Execution Time: 48139.000 ms    -- 48 SECONDS!
+```
+
+### Solution
+Deploy the already-merged migration to create missing indexes:
+
+```sql
+-- Migration: 340fa1ccadc5
+CREATE INDEX CONCURRENTLY ix_cells_sheet_tab_versioned_col_hash_updated
+ON cells (sheet_id, tab_id, versioned_column_id, cell_hash, updated_at DESC);
+
+CREATE INDEX CONCURRENTLY ix_cells_max_updated_at_per_sheet_tab
+ON cells (sheet_id, tab_id, updated_at DESC, versioned_column_id);
+```
+
+### Expected Impact
+- DISTINCT ON: 5.58s → <100ms (98% reduction)
+- MAX() query: 48s → <10ms (99.98% reduction)
+- Eliminate 120+ second timeouts
 
 ---
 
-## SQL Query End-to-End Flow
+## Problem 2: Connection Pool Misconfiguration
 
-### Step 1: Connection Acquisition
+### Problem
+Connection acquisition delays of 60 seconds and 210 seconds affecting 563k spans across all services.
 
-#### Problem
-- **Connection acquisition delays** of 60 seconds and 210 seconds (cascading retries)
-- **Connection latency spikes** of 13-26ms observed in CloudWatch metrics
-- **Root Causes**: 
-  1. LIFO pooling causing connection starvation (same 5 connections reused, others idle)
-  2. Missing `pool_timeout` parameter (defaults to 30 seconds)
-  3. RDS Proxy idle timeout mismatch (30 min proxy vs 60 min pool recycle)
-  4. ALB timeout misalignment (some services at 60 seconds)
-  5. TLS handshake overhead on new connections
+### Evidence
 
-#### Evidence
-```python
-# Current Configuration (session_provider.py:93-100)
-pool_use_lifo=True,      # Reuses same connections repeatedly (causes starvation)
-pool_recycle=3600.0,     # 1 hour (exceeds RDS Proxy 30 min timeout!)
-pool_timeout=None,       # Missing! Defaults to 30 seconds
-pool_pre_ping=True,      # Good - validates connections
-
-# RDS Proxy Configuration  
-IdleClientTimeout: 1800  # 30 minutes
-RequireTLS: true         # Adds TLS handshake overhead
-ConnectionBorrowTimeout: 120  # In Terraform but shows null in AWS
-
-# Application Timeouts
-DOC_MANAGER_REQUEST_TIMEOUT: 60  # Too short for large operations
-FASTBUILD_PROXY_TIMEOUT: 60.0    # Causes cascading failures
-
-# ALB Configuration
-flashdocs idle_timeout: 60       # Kills connections mid-operation
-sheets idle_timeout: 360         # Better but still may be too short
-```
-
-#### Recommended Solutions
-
-**A. RDS Proxy Configuration** (⚠️ Partial - In Staging)
-
-**Current Production Settings** ([postgres_rds_proxy.tf](https://github.com/hebbia/mono/blob/main/infra/service-classic/postgres_rds_proxy.tf)):
-```terraform
-# Production Configuration
-resource "aws_db_proxy" "postgres" {
-  idle_client_timeout          = 1800  # 30 minutes
-  max_connections_percent      = 100   # Use all available connections
-  connection_borrow_timeout    = 120   # 2-minute wait for connection
-  require_tls                  = true  # Enforces TLS (adds handshake overhead)
-}
-```
-
-**Staging Configuration** (currently being tested):
-```terraform
-# Reduced timeout to fail fast rather than wait
-connection_borrow_timeout = 30   # 30 seconds (down from 120)
-```
-
-**AWS CloudWatch Evidence**:
+#### AWS CloudWatch - Connection Latency Spikes
 ```bash
-# Connection borrow latency shows millisecond-level spikes
-aws cloudwatch get-metric-statistics \
+aws --profile readonly --region us-east-1 cloudwatch get-metric-statistics \
   --namespace AWS/RDS \
   --metric-name DatabaseConnectionsBorrowLatency \
-  --dimensions Name=ProxyName,Value=hebbia-backend-postgres-prod
-# Results: 13-26ms spikes observed (see Evidence A.2)
+  --dimensions Name=ProxyName,Value=hebbia-backend-postgres-prod \
+  --period 300 --statistics Maximum
+
+# Results:
+{"Timestamp": "2025-09-02T02:24:00", "LatencyMs": 23.016}
+{"Timestamp": "2025-09-02T02:39:00", "LatencyMs": 13.062}
+{"Timestamp": "2025-09-02T02:44:00", "LatencyMs": 26.392}
 ```
 
-**B. SQLAlchemy Pool Configuration**
+#### Datadog APM - 60s and 210s Timeout Patterns
+```bash
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
+  "traces:@duration:>55000000000 @duration:<65000000000" --timeframe 1d
 
-First, add comprehensive logging to validate ALL issues:
+# Result: 563k spans with 60-second delays
+# Affected services: metadata-indexer-b, doc-indexer-b, fastbuild_status_updater
+```
+🔗 [View affected traces](https://app.datadoghq.com/apm/traces?query=@duration%3A%3E55000000000%20@duration%3A%3C65000000000&start=1756490400000&end=1756508400000)
+
+#### Current Misconfiguration
 ```python
-# Add to session_provider.py for complete connection lifecycle monitoring
-import time
-from sqlalchemy import event
-from sqlalchemy.pool import Pool
+# session_provider.py:93-100
+pool_use_lifo=True,      # Problem: Same 5 connections reused
+pool_recycle=3600.0,     # Problem: 60 min > RDS Proxy 30 min timeout
+pool_timeout=None,       # Problem: Defaults to 30 seconds
 
-# Track pool-level events
-@event.listens_for(Pool, "connect")
-def receive_connect(dbapi_conn, connection_record):
-    """Fires when a new DB connection is created"""
-    connection_record.info['connect_time'] = time.time()
-    connection_record.info['checkout_count'] = 0
-    connection_record.info['total_idle_time'] = 0
-    connection_record.info['last_checkin_time'] = None
-    
-    # Log new connection creation (indicates pool exhaustion or recycling)
-    logging.warning("connection_created",
-                   event="new_connection",
-                   pool_size=connection_record.pool.size(),
-                   overflow=connection_record.pool.overflow(),
-                   total=connection_record.pool.checkedout())
-
-@event.listens_for(Pool, "checkout")
-def receive_checkout(dbapi_conn, connection_record, connection_proxy):
-    """Fires when connection is checked out from pool"""
-    checkout_start = time.time()
-    age = checkout_start - connection_record.info.get('connect_time', 0)
-    
-    # Calculate how long this connection was idle
-    idle_time = 0
-    if connection_record.info.get('last_checkin_time'):
-        idle_time = checkout_start - connection_record.info['last_checkin_time']
-        connection_record.info['total_idle_time'] += idle_time
-    
-    connection_record.info['checkout_count'] += 1
-    connection_record.info['last_checkout_time'] = checkout_start
-    
-    # Log potential issues
-    if idle_time > 1800:  # 30 minutes
-        logging.error("stale_connection_reused",
-                     idle_seconds=idle_time,
-                     connection_age=age,
-                     checkout_count=connection_record.info['checkout_count'],
-                     risk="May be killed by RDS Proxy")
-    
-    if age > 3600:  # 1 hour
-        logging.warning("old_connection_active",
-                       connection_age_seconds=age,
-                       checkouts=connection_record.info['checkout_count'])
-    
-    # Track connection acquisition time (detects pool timeout issues)
-    if hasattr(connection_proxy, '_pool_checkout_timestamp'):
-        wait_time = checkout_start - connection_proxy._pool_checkout_timestamp
-        if wait_time > 5:
-            logging.error("slow_connection_acquisition",
-                         wait_seconds=wait_time,
-                         pool_size=connection_record.pool.size(),
-                         cause="Pool exhaustion or timeout")
-
-@event.listens_for(Pool, "checkin")
-def receive_checkin(dbapi_conn, connection_record):
-    """Fires when connection is returned to pool"""
-    connection_record.info['last_checkin_time'] = time.time()
-    
-    # Track connection usage duration
-    if connection_record.info.get('last_checkout_time'):
-        usage_time = time.time() - connection_record.info['last_checkout_time']
-        if usage_time > 60:
-            logging.warning("long_connection_usage",
-                          usage_seconds=usage_time,
-                          checkouts=connection_record.info['checkout_count'])
-
-@event.listens_for(Pool, "reset")
-def receive_reset(dbapi_conn, connection_record):
-    """Fires when connection is reset (recycled)"""
-    age = time.time() - connection_record.info.get('connect_time', 0)
-    logging.info("connection_recycled",
-                age_seconds=age,
-                total_checkouts=connection_record.info.get('checkout_count', 0),
-                total_idle_time=connection_record.info.get('total_idle_time', 0))
-
-@event.listens_for(Pool, "invalidate")
-def receive_invalidate(dbapi_conn, connection_record, exception):
-    """Fires when connection is invalidated due to error"""
-    age = time.time() - connection_record.info.get('connect_time', 0)
-    logging.error("connection_invalidated",
-                 age_seconds=age,
-                 exception=str(exception),
-                 checkouts=connection_record.info.get('checkout_count', 0))
-
-# Track actual connection establishment time (TLS handshake)
-@event.listens_for(engine, "do_connect")
-def receive_do_connect(dialect, conn_rec, cargs, cparams):
-    """Measure actual connection establishment time"""
-    start = time.time()
-    try:
-        connection = dialect.do_connect(cargs, cparams)
-        duration = time.time() - start
-        if duration > 1.0:
-            logging.warning("slow_tls_handshake",
-                          duration_seconds=duration,
-                          cause="TLS negotiation with RDS Proxy")
-        return connection
-    except Exception as e:
-        duration = time.time() - start
-        logging.error("connection_failed",
-                     duration_seconds=duration,
-                     error=str(e))
-        raise
-
-# Monitor pool timeout events
-@event.listens_for(Pool, "timeout")
-def receive_timeout(dbapi_conn, connection_record):
-    """Fires when pool.get() times out waiting for connection"""
-    logging.error("pool_timeout",
-                 message="Failed to acquire connection from pool",
-                 pool_size=connection_record.pool.size(),
-                 overflow=connection_record.pool.overflow(),
-                 checked_out=connection_record.pool.checkedout(),
-                 cause="All connections busy, pool exhausted")
+# RDS Proxy: IdleClientTimeout = 1800 (30 min)
+# ALB: flashdocs idle_timeout = 60 (kills connections mid-operation)
 ```
 
-After confirming with logs, implement comprehensive fix:
+### Solution
+
+Update [session_provider.py](https://github.com/hebbia/mono/blob/main/brain/database/session_provider.py#L93-L100):
+
 ```python
 # SQLAlchemy Configuration Fix
 return create_async_engine(
@@ -234,711 +131,86 @@ return create_async_engine(
     pool_recycle=600,           # 10 min (was 3600) - less than RDS Proxy timeout
     pool_use_lifo=False,         # FIFO (was True) - rotate all connections  
     pool_pre_ping=True,
-    pool_timeout=30.0,           # NEW - explicit 30s timeout for connection acquisition
+    pool_timeout=30.0,           # NEW - explicit 30s timeout
     connect_args={
         "server_settings": {
-            "jit": "off",
-            "statement_timeout": "300000",    # NEW - 5 min default query timeout
-            "lock_timeout": "10000"           # NEW - 10s lock acquisition timeout
+            "statement_timeout": "300000",    # 5 min query timeout
+            "lock_timeout": "10000"           # 10s lock timeout
         },
-        "command_timeout": None,               # NEW - no psycopg command timeout
-        "connect_timeout": 10                  # NEW - 10s to establish connection
+        "connect_timeout": 10                  # 10s to establish connection
     },
     **engine_kwargs,
 )
 ```
 
----
+### Expected Impact
+- Connection acquisition: <100ms (current: 60-210 seconds)
+- Eliminate cascading retry delays
+- Prevent stale connection issues
 
-### Step 2: Table Scan
+## Problem 3: Insufficient work_mem Causing Disk Spills
 
-#### Problem
-- **Missing composite index** causes full table scan
-- Scanning 830,518 rows for MAX() queries (48+ seconds)
-- Scanning 242,553 rows for DISTINCT ON queries
+### Problem
+Sorts require 272MB but work_mem is only 4MB, causing disk spills and 5+ second queries.
 
-#### Code Call Path
+### Evidence
+
+#### Database Configuration Check
+```bash
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py --env prod \
+  "SELECT name, setting FROM pg_settings WHERE name = 'work_mem'"
+
+# Result: work_mem = 4096 kB (only 4MB!)
 ```
-get_rows() [get_rows.py:L49]
-└── fetch_rows_with_cells() [cells.py:L756-L869]
-    └── latest_cells_query (DISTINCT ON) [cells.py:L769]
-        └── SQL: SELECT DISTINCT ON (cell_hash) ...
-```
 
-**Critical Code Locations**:
-- Entry point: [get_rows.py:L49](https://github.com/hebbia/mono/blob/main/sheets/cortex/ssrm/get_rows.py#L49)
-- Main query logic: [cells.py:L756-L869](https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L756-L869) 
-- DISTINCT ON query: [cells.py:L769](https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L769)
-- fetch_relevant_rows: [get_rows_utils.py](https://github.com/hebbia/mono/blob/main/sheets_engine/common/get_rows_utils.py)
-
-**Live Performance Monitoring**:
-- [View slow queries in Datadog](https://app.datadoghq.com/logs?query=run_get_rows_db_queries%20%40attributes.total_db_queries_time%3A%3E2&from_ts=1756490400000&to_ts=1756508400000)
-- [View 120+ second timeouts](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
-
-#### Recommended Solution: Deploy Missing Indexes
-
-**✅ UPDATE (2025-09-02)**: Indexes have been **MERGED to main branch**!
-- **Model Definition**: [brain/models/cells.py:L198-L212](https://github.com/hebbia/mono/blob/main/brain/models/cells.py#L198-L212)
-- **Migration File**: [340fa1ccadc5](https://github.com/hebbia/mono/blob/main/migrations/versions/2025_09_02_1447-340fa1ccadc5_add_indexes_with_desc_ordering_for_get_.py)
-- **Status**: Ready for production deployment via migration
-
-**Verification**: [View 5.74s slow query in Datadog](https://app.datadoghq.com/logs?query=run_get_rows_db_queries&event=AwAAAZj2INx4Zpr8OwAAABhBWmoySU41eUFBQWo0QW5xMnFRY0tBQUQAAAAkZjE5OGY2MmUtODI5ZS00N2EzLThmM2QtNDc5MjIyZTQ1Y2Q2AAgY2Q&from_ts=1756490400000&to_ts=1756490460000)
-
+#### SQL EXPLAIN Showing Disk Spill
 ```sql
--- Index 1: For DISTINCT ON queries (needed for cells.py:L1824 ORDER BY)
-CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_cells_sheet_tab_versioned_col_hash_updated
-ON cells (sheet_id, tab_id, versioned_column_id, cell_hash, updated_at DESC);
+EXPLAIN (ANALYZE, BUFFERS) 
+SELECT DISTINCT ON (cell_hash) * FROM cells 
+WHERE sheet_id = '...' AND tab_id = '...'
+ORDER BY cell_hash, updated_at DESC;
 
--- Index 2: For MAX() cache validation queries
-CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_cells_max_updated_at_per_sheet_tab
-ON cells (sheet_id, tab_id, updated_at DESC, versioned_column_id);
-
--- Note: Use CONCURRENTLY to avoid table locks in production
--- Estimated creation time: 15-30 minutes each on 73.5M row table
+-- Result:
+Sort Method: external merge  Disk: 272496kB    -- 272MB exceeds 4MB!
+Buffers: temp read=54715 written=88595         -- Heavy I/O
+Execution Time: 5583.061 ms
 ```
 
-**Expected Impact**:
-- DISTINCT ON: 5.58s → <100ms (98% reduction)
-- MAX() query: 48s → <10ms (99.98% reduction)
-
----
-
-### Step 3: Result Processing (Sort & Deduplicate)
-
-#### Problem A: Missing Index (Same as Step 2)
-Without proper index, database must:
-1. Load all rows into memory
-2. Sort 242,553 rows by (cell_hash, updated_at DESC)
-3. Apply DISTINCT operation
-4. Return results
-
-With index: Data comes pre-sorted, no separate sort needed!
-
-#### Problem B: Insufficient work_mem
-- Current: `work_mem = 4MB`
-- Required: 272MB for sort operation
-- Result: **Disk spill** with external merge sort
-
-#### Evidence from SQL Analysis
+### Solution
 ```sql
-EXPLAIN (ANALYZE, BUFFERS) Output:
--- Sort step showing disk spill
-Sort Method: external merge  Disk: 272496kB    <-- 272MB exceeds 4MB work_mem!
-Buffers: temp read=54715 written=88595         <-- Heavy temp file I/O
-
--- Performance impact
-Execution Time: 5583.061 ms (with disk spill)
-Expected with adequate memory: <1000ms
-```
-
-#### Recommended Solution
-```sql
--- Increase work_mem for in-memory sorts
 ALTER SYSTEM SET work_mem = '256MB';
-
--- Optimize I/O for remaining disk operations
 ALTER SYSTEM SET effective_io_concurrency = '200';
-
--- Apply changes
 SELECT pg_reload_conf();
 ```
 
-**Note**: After implementing indexes, work_mem becomes less critical for these specific queries but remains important for complex JOINs, aggregations, and ad-hoc queries.
+### Expected Impact
+- Eliminate disk spills for standard queries
+- Query time: 5.58s → <1s (80% reduction)
 
 ---
 
 ## Implementation Priority
 
-1. **🔴 CRITICAL - Deploy Database Migration** (Immediate - Day 1) ✅ Code Merged
-   - Run migration [340fa1ccadc5](https://github.com/hebbia/mono/blob/main/migrations/versions/2025_09_02_1447-340fa1ccadc5_add_indexes_with_desc_ordering_for_get_.py) in production
-   - Creates two critical composite indexes
-   - Eliminates both scan and sort problems
-   - [View 120+ second timeouts this will fix](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
-
-2. **🔴 CRITICAL - Connection Pool Fix** (Immediate - Day 1-2)
-   - Update [session_provider.py](https://github.com/hebbia/mono/blob/main/brain/database/session_provider.py#L93-L100)
-   - Fixes 60-second and 210-second connection delays
-   - Affects ALL services (563k spans impacted)
-   - [View affected traces](https://app.datadoghq.com/apm/traces?query=@duration%3A%3E55000000000%20@duration%3A%3C65000000000&start=1756490400000&end=1756508400000)
-
-3. **🟡 HIGH - Timeout Alignment** (Day 2)
-   - Update ALB timeouts (flashdocs from 60s to 360s)
-   - Update application timeouts (DOC_MANAGER from 60s to 300s)
-   - Deploy RDS Proxy configuration fixes
-
-4. **🟢 MEDIUM - work_mem & Query Timeouts** (Week 1)
-   - Increase work_mem to 256MB for large sorts
-   - Implement timeout override utilities for large matrix operations
-   - Still valuable for overall database health
+1. **🔴 Day 1**: Deploy migration `340fa1ccadc5` - Fixes 120+ second timeouts
+2. **🔴 Day 1-2**: Update `session_provider.py` - Fixes 60-210 second connection delays  
+3. **🟡 Day 2**: Align ALB/application timeouts - Prevents mid-operation kills
+4. **🟢 Week 1**: Increase work_mem to 256MB - Eliminates disk spills
 
 ---
 
-## Appendix
-
-### A. Database Statistics
-
-#### Connection Analysis
-```sql
--- Current connection distribution
-SELECT client_addr, count(*) 
-FROM pg_stat_activity 
-GROUP BY client_addr;
-
-Result:
-Via RDS Proxy (NULL): 4,390 (99.98%)
-Direct connections: 1 (0.02%)
-
--- Note: Most are reserved slots, actual active ~25 connections
-```
-
-#### Table Statistics
-
-**Production Database Query** (2025-09-01):
-```sql
-SELECT COUNT(*) as total_cells, 
-       pg_size_pretty(pg_total_relation_size('public.cells')) as total_size 
-FROM cells;
-```
-
-**Result**:
-```
-Total Cells: 73,544,935 rows
-Total Size: 306 GB (table + indexes)
-Table Only: ~187 GB
-Indexes: ~119 GB (39% of total)
-```
-
-**Key Insights**:
-- Cells table has grown to 73.5M rows
-- Total storage footprint is 306 GB
-- Indexes consume 119 GB (12 indexes)
-- Missing indexes would add ~15-20 GB but eliminate 48+ second queries
-
-### B. Current Database Indexes
-
-**Production Database Query** (2025-09-01):
-```sql
-SELECT indexname, indexdef, pg_size_pretty(pg_relation_size(('public.'||indexname)::regclass)) as index_size 
-FROM pg_indexes 
-WHERE tablename = 'cells' 
-ORDER BY indexname;
-```
-
-**Current Indexes (12 total, 119 GB combined)**:
-| Index Name | Definition | Size | Purpose |
-|------------|------------|------|---------|
-| `cells_pkey` | `btree (id)` | 3.0 GB | Primary key |
-| `idx_cells_answer_trgm` | `gin (answer gin_trgm_ops)` | 40 GB | Full-text search |
-| `idx_cells_content_is_loading_partial` | `btree (sheet_id, row_id) WHERE...` | 1.1 GB | Loading state filter |
-| `ix_cells_answer_date` | `btree (answer_date)` | 1.0 GB | Date filtering |
-| `ix_cells_answer_numeric` | `btree (answer_numeric)` | 3.3 GB | Numeric filtering |
-| `ix_cells_cell_hash` | `btree (cell_hash)` | 13 GB | Hash lookups |
-| `ix_cells_cell_hash_updated_at_desc` | `btree (cell_hash, updated_at)` | 34 GB | Recent changes |
-| `ix_cells_global_hash` | `btree (global_hash)` | 4.2 GB | Global deduplication |
-| `ix_cells_row_id` | `btree (row_id)` | 1.6 GB | Row relationships |
-| `ix_cells_sheet_id` | `btree (sheet_id)` | 2.2 GB | Sheet filtering |
-| `ix_cells_sheet_tab_versioned_col` | `btree (sheet_id, tab_id, versioned_column_id)` | 2.4 GB | Partial composite |
-| `ix_cells_tab_id` | `btree (tab_id)` | 2.2 GB | Tab filtering |
-
-**⚠️ CRITICAL: Missing Indexes**:
-
-1. **Missing in Production** (causes DISTINCT ON timeout):
-   ```sql
-   -- Needed for query at cells.py:L1824 but NOT deployed to production!
-   CREATE INDEX ix_cells_sheet_tab_versioned_col_hash_updated
-   ON cells (sheet_id, tab_id, versioned_column_id, cell_hash, updated_at DESC);
-   ```
-
-2. **Missing in Production** (causes MAX() query timeout):
-   ```sql
-   -- Needed for cache validation but NOT deployed to production!
-   CREATE INDEX ix_cells_max_updated_at_per_sheet_tab
-   ON cells (sheet_id, tab_id, updated_at DESC, versioned_column_id);
-   ```
-
-**Evidence**: Database query confirms these indexes are NOT in production! [See Evidence A.1](#a1-missing-indexes-verification)
-
-### C. Sample Query Analysis
-
-#### DISTINCT ON Query Without Index
-```sql
-EXPLAIN (ANALYZE, BUFFERS) 
-SELECT DISTINCT ON (cell_hash) *
-FROM cells 
-WHERE sheet_id = 'a7022a2e-0f21-4258-b219-26fb733fc008'
-  AND tab_id = 'f47ac10b-58cc-4372-a567-0e02b2c3d479'
-  AND versioned_column_id IN ('col1', 'col2', 'col3')
-ORDER BY cell_hash, updated_at DESC 
-LIMIT 100;
-
-QUERY PLAN:
-Limit (actual time=5583.061..5583.088 rows=100)
-  -> Sort (actual time=5583.061..5583.088 rows=100)
-        Sort Key: cell_hash, updated_at DESC
-        Sort Method: external merge  Disk: 272496kB    <-- DISK SPILL!
-        Buffers: shared hit=5947 read=6842, temp read=54715 written=88595
-        -> Bitmap Heap Scan on cells (actual time=12.456..5234.123 rows=242553)
-              Rows Removed by Filter: 123456
-              Heap Blocks: exact=12789
-              
-Execution Time: 5583.061 ms
-```
-
-#### MAX() Query Without Index
-```sql
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT MAX(updated_at) 
-FROM cells 
-WHERE sheet_id = '13b97ee4-9c39-4822-9219-8460f97cd982'
-  AND tab_id = 'cceb8056-533f-4093-b249-3bf6a4d95daa';
-
-QUERY PLAN:
-Aggregate (actual time=48139.234..48139.235 rows=1)
-  -> Seq Scan on cells (actual time=0.032..47234.123 rows=830518)
-        Filter: ((sheet_id = '...'::uuid) AND (tab_id = '...'::uuid))
-        Rows Removed by Filter: 157404049
-        Buffers: shared hit=234567 read=456789
-        
-Execution Time: 48139.000 ms    <-- 48 SECONDS!
-```
-
-### D. Database Configuration
-```sql
--- Current problematic settings
-SELECT name, setting, unit 
-FROM pg_settings 
-WHERE name IN ('work_mem', 'effective_io_concurrency', 'random_page_cost');
-
-work_mem: 4096 kB (4MB)
-effective_io_concurrency: 1
-random_page_cost: 4
-```
-
----
-
-## Evidence Limitations & Recommendations
-
-### Business Hours Evidence (Friday, Aug 29, 2025, 10 AM - 3 PM EST)
-
-1. **Performance Statistics**:
-   - Average query time: 284ms
-   - Max query time: [5.74 seconds (view in Datadog)](https://app.datadoghq.com/logs?query=run_get_rows_db_queries&event=AwAAAZj2INx4Zpr8OwAAABhBWmoySU41eUFBQWo0QW5xMnFRY0tBQUQAAAAkZjE5OGY2MmUtODI5ZS00N2EzLThmM2QtNDc5MjIyZTQ1Y2Q2AAgY2Q&from_ts=1756490400000&to_ts=1756490460000)
-   - 100+ slow query warnings in 5 hours
-
-2. **Critical Timeouts Found**:
-   - **[19 operations timing out at exactly 120 seconds](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)**
-   - All resulted in `httpx.HTTPStatusError`
-   - fetch_relevant_rows operations: 25.49 seconds max ([see code](https://github.com/hebbia/mono/blob/main/sheets_engine/common/get_rows_utils.py))
-
-### Evidence URLs
-
-**5.74 second query** (Aug 29, 14:00:05 EST):
-https://app.datadoghq.com/logs?query=run_get_rows_db_queries&event=AwAAAZj2INx4Zpr8OwAAABhBWmoySU41eUFBQWo0QW5xMnFRY0tBQUQAAAAkZjE5OGY2MmUtODI5ZS00N2EzLThmM2QtNDc5MjIyZTQ1Y2Q2AAgY2Q&from_ts=1756490400000&to_ts=1756490460000
-
-**Query for 120+ second timeouts**:
-```bash
-cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
-  "traces:resource_name:*fetch_relevant_rows* @duration:>120000000000" \
-  --timeframe "2025-08-29T14:00:00,2025-08-29T19:00:00"
-```
-
----
-
-*Report Date: 2025-09-01*  
-*Updated: 2025-09-02 with business hours evidence confirming 120+ second timeouts*  
-*Updated: 2025-09-02 with connection timeout root cause analysis from Datadog APM*  
-*Updated: 2025-09-02 with code merge confirmation - indexes ready for production deployment*
-
-## Next Steps
-
-1. **Immediate**: Run migration `340fa1ccadc5` in production - [Monitor impact here](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*&start=1756490400000&end=1756508400000)
-2. **Day 1-2**: Update [session_provider.py](https://github.com/hebbia/mono/blob/main/brain/database/session_provider.py#L93-L100) with connection pool fixes
-3. **This Week**: Add connection lifecycle logging to validate pool behavior
-4. **Ongoing**: Monitor [performance logs](https://app.datadoghq.com/logs?query=run_get_rows_db_queries) and [slow query warnings](https://app.datadoghq.com/logs?query=%22slow%20get_relevant_rows%20query%22)
-
-## Success Metrics
-
-After implementing all fixes:
-- **Connection acquisition**: <100ms (current: 60-210 seconds)
-- **P99 query latency**: <1 second (current: 120+ second timeouts)
-- **Zero timeout errors** (current: 19 timeouts in 5 hours)
-- **No disk spills** for standard queries
-- **fetch_relevant_rows**: <1 second (current: 25+ seconds)
-- **Large matrix support**: 2+ hours with timeout overrides
-
----
-
-## Evidence Appendix
-
-### A.1 Missing Indexes Verification
-
-**⚠️ UPDATE (2025-09-02)**: Indexes have been **MERGED to main branch** and migration created!
-- **Code Location**: [brain/models/cells.py:L198-L212](https://github.com/hebbia/mono/blob/main/brain/models/cells.py#L198-L212)
-- **Migration**: [2025_09_02_1447-340fa1ccadc5](https://github.com/hebbia/mono/blob/main/migrations/versions/2025_09_02_1447-340fa1ccadc5_add_indexes_with_desc_ordering_for_get_.py)
-- **Status**: Awaiting deployment to production
-
-**Command**: Verify indexes in production database
-```bash
-cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py --env prod \
-  "SELECT indexname FROM pg_indexes WHERE tablename = 'cells' ORDER BY indexname"
-```
-
-**Output**: Only 12 indexes exist (missing the 2 critical composite indexes)
-```json
-[
-  {"indexname": "cells_pkey"},
-  {"indexname": "idx_cells_answer_trgm"},
-  {"indexname": "idx_cells_content_is_loading_partial"},
-  {"indexname": "ix_cells_answer_date"},
-  {"indexname": "ix_cells_answer_numeric"},
-  {"indexname": "ix_cells_cell_hash"},
-  {"indexname": "ix_cells_cell_hash_updated_at_desc"},
-  {"indexname": "ix_cells_global_hash"},
-  {"indexname": "ix_cells_row_id"},
-  {"indexname": "ix_cells_sheet_id"},
-  {"indexname": "ix_cells_sheet_tab_versioned_col"},
-  {"indexname": "ix_cells_tab_id"}
-]
-```
-
-**Indexes Added in Code (Pending Production Deployment)**:
-- ✅ `ix_cells_sheet_tab_versioned_col_hash_updated` (5 columns for DISTINCT ON)
-- ✅ `ix_cells_max_updated_at_per_sheet_tab` (4 columns for MAX queries)
-
-### A.2 Connection Latency & Pool Metrics
-
-**Command 1**: Check RDS Proxy connection borrow latency
-```bash
-aws --profile readonly --region us-east-1 cloudwatch get-metric-statistics \
-  --namespace AWS/RDS \
-  --metric-name DatabaseConnectionsBorrowLatency \
-  --dimensions Name=ProxyName,Value=hebbia-backend-postgres-prod \
-  --start-time $(date -u -v-1H '+%Y-%m-%dT%H:%M:%S') \
-  --end-time $(date -u '+%Y-%m-%dT%H:%M:%S') \
-  --period 300 --statistics Maximum
-```
-
-**Output**: Connection latency spikes
-```json
-{"Timestamp": "2025-09-02T02:24:00+00:00", "LatencyMs": 23.016}
-{"Timestamp": "2025-09-02T02:39:00+00:00", "LatencyMs": 13.062}
-{"Timestamp": "2025-09-02T02:44:00+00:00", "LatencyMs": 26.392}
-```
-
-**Command 2**: Monitor new connection establishment rate
-```bash
-aws --profile readonly --region us-east-1 cloudwatch get-metric-statistics \
-  --namespace AWS/RDS \
-  --metric-name DatabaseConnectionsSetupSucceeded \
-  --dimensions Name=ProxyName,Value=hebbia-backend-postgres-prod \
-  --start-time $(date -u -v-2H '+%Y-%m-%dT%H:%M:%S') \
-  --end-time $(date -u '+%Y-%m-%dT%H:%M:%S') \
-  --period 300 --statistics Sum
-```
-
-**Output**: High connection churn rate
-```json
-{"time": "2025-09-02T01:39:00", "new_connections": 24}  // Spike
-{"time": "2025-09-02T01:44:00", "new_connections": 8}
-{"time": "2025-09-02T02:04:00", "new_connections": 11}
-```
-
-**Analysis**: 
-- Frequent new connection establishment (6-24 per 5 minutes)
-- Indicates connections being recycled due to idle timeout
-- Each new connection requires TLS handshake (adds latency)
-
-### A.3 Database Configuration
-
-**Command**: Check PostgreSQL performance settings
-```bash
-cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py --env prod \
-  "SELECT name, setting, unit FROM pg_settings \
-   WHERE name IN ('work_mem', 'effective_io_concurrency', 'random_page_cost')"
-```
-
-**Output**: Suboptimal configuration
-```json
-[
-  {"name": "work_mem", "setting": "4096", "unit": "kB"},  // Only 4MB!
-  {"name": "effective_io_concurrency", "setting": "1", "unit": null},  // No parallelism
-  {"name": "random_page_cost", "setting": "4", "unit": null}
-]
-```
-
-### A.4 Slow Query Evidence (Datadog - Updated 2025-09-02)
-
-**Command 1**: Find slow get_rows queries (>2 seconds)
-```bash
-cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
-  "logs:run_get_rows_db_queries" --timeframe 24h --raw | \
-  jq '.data[] | select(.attributes.attributes.total_db_queries_time > 1)'
-```
-
-**Output**: Business hours query (Aug 29, 2025):
-```
-Sheet: df83e81d-4afd-4b89-bfbd-2797f9b3ad8e | Time: 5.7407s | Cache: False | Rows: 43
-19 operations timing out at 120+ seconds with httpx.HTTPStatusError
-```
-
-**🔗 View Performance Logs in Datadog**:  
-<https://app.datadoghq.com/logs?query=run_get_rows_db_queries&from_ts=1756697919305&to_ts=1756784319305>
-
-**Command 2**: Slow query warnings (100+ occurrences)
-```bash
-cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
-  'logs:"slow get_relevant_rows query"' --timeframe 24h
-```
-
-**Output**: Consistent warnings every few seconds
-```
-2025-09-01 01:54:01 - slow get_relevant_rows query taking > 2 seconds
-2025-09-01 01:54:16 - slow get_relevant_rows query taking > 2 seconds  
-2025-09-01 01:54:26 - slow get_relevant_rows query taking > 2 seconds
-2025-09-01 01:54:29 - slow get_relevant_rows query taking > 2 seconds
-[100+ similar entries - API limit reached]
-```
-
-
-**🔗 View Slow Query Warnings**:  
-<https://app.datadoghq.com/logs?query=%22slow%20get_relevant_rows%20query%22&from_ts=1756697959216&to_ts=1756784359216>
-
-**Command 3**: APM Traces showing slow operations  
-```bash
-cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
-  "traces:service:sheets @duration:>3000000000" --timeframe 4h
-```
-
-**Output**: Multiple slow API endpoints (>3 seconds)
-```
-/ssrm/get-rows: 5135.24ms, 5609.61ms, 10553.41ms (staging)
-sheets.api.matrix_api.get_rows: 5134.94ms, 10553.07ms (staging)
-_get_relevant_rows_cached: 3000-11000ms operations
-[100+ traces found in 4-hour window]
-```
-
-
-**🔗 View APM Traces**:  
-<https://app.datadoghq.com/apm/traces?query=service%3Asheets%20%40duration%3A%3E3000000000&start=1756770000000&end=1756784400000>
-
-### A.5 RDS Proxy Configuration
-
-**Command**: Verify RDS Proxy settings
-```bash
-aws --profile readonly --region us-east-1 rds describe-db-proxies \
-  --db-proxy-name hebbia-backend-postgres-prod \
-  --query 'DBProxies[0].[IdleClientTimeout,RequireTLS]'
-```
-
-**Output**: 30-minute timeout confirmed
-```json
-[1800, true]  // 1800 seconds = 30 minutes idle timeout
-```
-
-
-### A.6 Code Analysis - Index Definitions
-
-**Command**: Search for index definitions in cells.py
-```bash
-grep -n "Index\|__table_args__" mono/brain/models/cells.py
-```
-
-
-**Output**: Current indexes in code (lines 159-190)
-```python
-__table_args__ = (
-    sa.Index("ix_cells_cell_hash", "cell_hash"),
-    sa.Index("ix_cells_global_hash", "global_hash"),
-    sa.Index("ix_cells_tab_id", "tab_id"),
-    sa.Index("ix_cells_sheet_id", "sheet_id"),
-    sa.Index("ix_cells_answer_numeric", "answer_numeric"),
-    sa.Index("ix_cells_answer_date", "answer_date"),
-    sa.Index("ix_cells_sheet_tab_versioned_col", 
-             "sheet_id", "tab_id", "versioned_column_id"),
-    sa.Index("ix_cells_row_id", "row_id"),
-    sa.Index("idx_cells_answer_trgm", "answer", 
-             postgresql_using="gin"),
-    sa.Index("ix_cells_cell_hash_updated_at_desc", 
-             "cell_hash", "updated_at"),
-    sa.Index("idx_cells_content_is_loading_partial",
-             "sheet_id", "row_id", postgresql_where=...)
-)
-```
-
-**Note**: The two critical composite indexes mentioned in the report are NOT in the current code. They may have been planned but never implemented.
-
-### A.7 Problematic Query Pattern
-
-**Location**: [sheets/data_layer/cells.py:L1810-1830](https://github.com/hebbia/mono/blob/main/sheets/data_layer/cells.py#L1810-L1830)
-
-**Impact**: This exact query pattern is causing the [120+ second timeouts in production](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
-
-```python
-def _latest_cells_query(
-    sheet_id: str,
-    active_tab_id: str,
-    column_ids: list[str],
-    cell_id: Optional[str] = None,
-) -> Select:
-    query = (
-        sa.select(Cell)
-        .distinct(Cell.cell_hash)  # DISTINCT ON clause
-        .where(
-            Cell.sheet_id == sheet_id,
-            Cell.tab_id == active_tab_id,
-            Cell.versioned_column_id.in_(column_ids),
-        )
-        .order_by(Cell.cell_hash, sa.desc(Cell.updated_at))  # Requires index!
-    )
-```
-
-**Performance Impact**:
-
-- This query runs DISTINCT ON with ORDER BY on 5 columns
-- Without the composite index, PostgreSQL must:
-  1. Scan all matching rows (potentially millions)
-  2. Sort them in memory or on disk
-  3. Apply DISTINCT operation
-- With proper index: Direct index scan, no sorting needed
-
-### A.8 Query Performance Improvement Projection
-
-**Current State** (without indexes):
-
-```text
-DISTINCT ON query: 5.58 seconds (disk spill: 272MB)
-MAX() query: 48+ seconds (full table scan)
-fetch_relevant_rows: 120+ seconds (confirmed timeouts)
-```
-
-**Projected State** (with indexes):
-
-```text
-DISTINCT ON query: <100ms (direct index scan)
-MAX() query: <10ms (index-only scan)
-Total request time: <1 second
-```
-
-**Expected Improvement**:
-
-- 98-99.98% reduction in query time
-- Elimination of disk spills
-- Zero timeout errors
-
----
-
-## Connection Timeout Analysis
-
-### Timeout Pattern Discovery (2025-09-02)
-
-**Finding**: Datadog APM reveals two distinct timeout patterns:
-- **60-second plateau**: Connection pool timeout + ALB timeout alignment
-- **210-second spikes**: Cascading retries (60s + 60s + 60s + 30s)
-
-**Affected Services** (from 563k analyzed spans):
-- `metadata-indexer-b` (26 connection issues)
-- `doc-indexer-b` (21 connection issues)  
-- `doc-association-indexer-b` (19 connection issues)
-- `fastbuild_status_updater` (14 connection issues)
-- All task types: `agents.task.prod`, `flashdocs.task.prod`, `fastbuild.task.prod`, `sheets_engine.graph.worker.task.prod`
-
-**Root Cause Analysis**:
-1. **SQLAlchemy `pool_use_lifo=True`**: Same 5 connections reused, others idle and timeout
-2. **Missing `pool_timeout`**: Defaults to 30 seconds, hidden bottleneck
-3. **Pool recycle mismatch**: 60-minute recycle vs 30-minute RDS Proxy timeout
-4. **ALB timeout**: Some services (flashdocs) have 60-second timeout, too short
-5. **Application timeouts**: DOC_MANAGER_REQUEST_TIMEOUT=60, causes cascading failures
-
-**Solution**: See [Connection Pool Fix](#b-sqlalchemy-pool-configuration) above
-
----
-
-## Additional Datadog Findings (2025-09-02)
-
-### Database Connection Metrics
-
-**PostgreSQL Connection Pool Status**
-
-```bash
-cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
-  "avg:postgresql.connections{*}" --timeframe 4h
-```
-
-**Current Status**: Stable but suboptimal
-- Average connections: 105.93 (ranging 94-112)
-- Connection usage: 42% (0.40-0.43 percent_usage)
-- No connection exhaustion detected
-
-
-**🔗 View Connection Metrics**:  
-<https://app.datadoghq.com/metric/explorer?from_ts=1756769965&to_ts=1756784365&live=true&query=avg%3Apostgresql.connections%7B%2A%7D>
-
-### Performance Distribution Analysis
-
-**Query Performance Breakdown** (24-hour sample):
-
-- Fast queries (<0.1s): ~60%
-- Normal queries (0.1-1s): ~38%
-- Slow queries (>1s): ~2%
-- Critical queries (>2s): <1%
-
-**Key Observations**:
-
-1. **120+ second timeouts confirmed**: 19 operations hit exact 120-second timeout limit
-2. **25+ second operations**: fetch_relevant_rows taking up to 25.49 seconds
-3. **100+ slow query warnings** during 5-hour business window
-4. **All timeouts resulted in HTTP errors**, directly impacting users
-
-### Direct Event URLs for Investigation
-
-**Example Slow Query Event**:  
-<https://app.datadoghq.com/logs?query=run_get_rows_db_queries&event=AwAAAZkCf0GGtIsIaAAAABhBWmtDZjBROUFBQU5CS2JYVTBfNUJBQUMAAAAkZjE5OTAyODEtZjcyZi00OTE1LTlmZTYtZWYwYzAzM2U0ZGI5AA3DYg>
-
-**Slow Query Warning Event**:  
-<https://app.datadoghq.com/logs?query=%22slow%20get_relevant_rows%20query%22&event=AwAAAZkC-zZDW3001wAAABhBWmtDLXphQUFBRFVWcXFfVHNTbDFRQW8AAAAkZjE5OTAyZmMtZjI5Ni00NjA4LThhYzgtYTc2YmNkYWQ0M2ZiAAxcjQ>
-
-### Correlation with Database Issues
-
-The Datadog evidence confirms the database performance issues identified:
-
-1. **Missing indexes** causing queries to exceed 2-3 seconds regularly
-2. **Connection pool** operating at 42% capacity (not the bottleneck)
-3. **Staging environment** experiencing 5-10 second API response times
-4. **No connection exhaustion** or timeout errors (queries complete, just slowly)
-
-## Critical Action Items
-
-### 1. Immediate Index Deployment (Day 1)
-
-**Why Critical**: [View the 19 timeout failures this will fix](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
-
-```sql
--- Run on production with CONCURRENTLY to avoid locks
-CREATE INDEX CONCURRENTLY ix_cells_sheet_tab_versioned_col_hash_updated
-ON cells (sheet_id, tab_id, versioned_column_id, cell_hash, updated_at DESC);
-
-CREATE INDEX CONCURRENTLY ix_cells_max_updated_at_per_sheet_tab
-ON cells (sheet_id, tab_id, updated_at DESC, versioned_column_id);
-```
-
-**Verify Impact**: Monitor [fetch_relevant_rows performance](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*&start=1756490400000&end=1756508400000) after deployment
-
-### 2. Connection Pool Fix (Day 2-3)
-
-**Code Location**: [session_provider.py](https://github.com/hebbia/mono/blob/main/brain/database/session_provider.py)
-
-```python
-# In session_provider.py
-pool_use_lifo=False,  # Rotate connections
-pool_recycle=1200,    # 20 min < 30 min RDS timeout
-```
-
-**Monitor**: [Connection metrics in Datadog](https://app.datadoghq.com/metric/explorer?from_ts=1756769965&to_ts=1756784365&live=true&query=avg%3Apostgresql.connections%7B%2A%7D)
-
-### 3. Database Tuning (Week 1)
-
-```sql
-ALTER SYSTEM SET work_mem = '256MB';
-ALTER SYSTEM SET effective_io_concurrency = '200';
-SELECT pg_reload_conf();
-```
+## Summary
+
+### Root Causes Identified
+1. **Missing indexes** causing full table scans on 73.5M rows
+2. **Connection pool misconfiguration** with LIFO reuse and timeout mismatches  
+3. **Insufficient work_mem** (4MB) causing 272MB disk spills
+
+### Business Impact
+- 19 operations timing out at 120+ seconds during business hours
+- 563k spans affected by 60-210 second connection delays
+- User-facing errors from `httpx.HTTPStatusError` timeouts
+
+### Expected Results After Fixes
+- Query latency: 48s → <10ms (99.98% reduction)
+- Connection acquisition: 60-210s → <100ms
+- Zero timeout errors and disk spills 
