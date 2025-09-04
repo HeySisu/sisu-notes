@@ -4,14 +4,14 @@
 
 This report identifies four critical performance issues affecting the `get_rows` function, with evidence-based solutions for each:
 
-1. **Missing database indexes** causing full table scans on 73.5M rows (48+ second queries)
+1. ✅ **Missing database indexes** causing full table scans on 73.5M rows (48+ second queries) - **DEPLOYED 2025-09-03**
 2. **Connection pool misconfigurations** resulting in 120-second timeout failures
 3. **N+1 query patterns** in hydration phase causing 31-second delays for just 37 rows
 4. **Insufficient work_mem** forcing 272MB sorts to spill to disk
 
 ### Performance Impact (Production Evidence)
-- **Missing indexes**: Causing 120+ second timeouts in production - [View Database Evidence](#a1-missing-indexes-verification)
-- **Table scan impact**: Queries scanning 830K+ rows taking 48+ seconds - [View Performance Analysis](#performance-correlation-analysis)
+- ✅ **Missing indexes**: DEPLOYED 2025-09-03 (PR #13537) - Index building in progress
+- **Current status**: Queries still taking 20-68s (expected while indexes build on 73.5M rows)
 - **Connection delays**: 60-second and 210-second (3.5 min) timeout patterns affecting 563k spans - [View APM Analysis](#connection-timeout-analysis)
 - **Timeout failures**: 78 operations timing out at exactly 120 seconds (17:59-18:12 EST) - [View in Datadog](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
 - **Slow operations**: fetch_relevant_rows taking up to 25 seconds - [Code Location](https://github.com/hebbia/mono/blob/main/sheets_engine/common/get_rows_utils.py)
@@ -99,17 +99,27 @@ connect_timeout_secs: int = 30  # Explicit 30-second timeout to fail fast
 
 ## Problem 2: Missing Database Indexes
 
+### ✅ UPDATE (2025-09-03): INDEXES DEPLOYED TO PRODUCTION (BUILDING IN PROGRESS)
+The critical indexes from PR #13537 were deployed to production on September 3, 2025:
+- `ix_cells_sheet_tab_versioned_col_hash_updated` - Deployed, may still be building
+- `ix_cells_max_updated_at_per_sheet_tab` - Deployed, may still be building
+
+**Important**: These indexes use `CREATE INDEX CONCURRENTLY` on a 73.5M row table (304 GB). The index building process can take several hours to complete. Until fully built, queries will not benefit from the indexes and will continue to show slow performance.
+
 ### Problem
 DISTINCT ON and MAX() queries perform full table scans on 73.5M row table, causing 48+ second queries and 120+ second timeouts.
 
 ### Evidence
 
-#### Database Query Showing Missing Indexes
+#### Database Query Confirming Deployed Indexes (2025-09-03)
 ```bash
 cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py --env prod \
-  "SELECT indexname FROM pg_indexes WHERE tablename = 'cells' ORDER BY indexname"
+  "SELECT indexname FROM pg_indexes WHERE tablename = 'cells' AND indexname LIKE '%updated%'"
 
-# Result: Only 12 indexes exist (missing 2 critical composite indexes)
+# Result (2025-09-03): 3 indexes including the 2 new ones:
+# - ix_cells_cell_hash_updated_at_desc (existing)
+# - ix_cells_sheet_tab_versioned_col_hash_updated (NEW - DEPLOYED)
+# - ix_cells_max_updated_at_per_sheet_tab (NEW - DEPLOYED)
 ```
 
 #### Datadog Logs - 120+ Second Timeouts
@@ -142,10 +152,10 @@ Execution Time: 48139.000 ms    -- 48 SECONDS!
 ```
 
 ### Solution
-Deploy the already-merged migration to create missing indexes:
+✅ **COMPLETED (2025-09-03)**: Migration deployed to production
 
 ```sql
--- Migration: 340fa1ccadc5
+-- Migration: 340fa1ccadc5 (Deployed September 3, 2025)
 CREATE INDEX CONCURRENTLY ix_cells_sheet_tab_versioned_col_hash_updated
 ON cells (sheet_id, tab_id, versioned_column_id, cell_hash, updated_at DESC);
 
@@ -153,10 +163,16 @@ CREATE INDEX CONCURRENTLY ix_cells_max_updated_at_per_sheet_tab
 ON cells (sheet_id, tab_id, updated_at DESC, versioned_column_id);
 ```
 
-### Expected Impact
+### Expected Impact (Now Active in Production)
 - DISTINCT ON: 5.58s → <100ms (98% reduction)
 - MAX() query: 48s → <10ms (99.98% reduction)
 - Eliminate 120+ second timeouts
+
+### Post-Deployment Monitoring Required
+Recent Datadog evidence shows continued slowness (20-68 seconds as of 2025-09-03 08:01):
+- **Expected**: Indexes may still be building on the 73.5M row table
+- **Action**: Recheck index status and query performance on 2025-09-04
+- **Note**: Once indexes are fully built, if slowness persists, focus on remaining bottlenecks (hydration N+1 queries and connection pool issues)
 
 ---
 
@@ -265,7 +281,8 @@ async def hydrate_rows_cached(...):
 
 ### Immediate Actions (Day 1)
 1. **Set AsyncPG timeout** (`configs.py`: `connect_timeout_secs=30`) - Eliminates 60-second hangs
-2. **Deploy database indexes** (migration `340fa1ccadc5`) - Eliminates 48-second table scans
+2. ✅ **Deploy database indexes** (migration `340fa1ccadc5`) - **DEPLOYED 2025-09-03, BUILDING IN PROGRESS**
+   - Recheck index build status 2025-09-04
 3. **Update RDS Proxy timeout** (Terraform: `connection_borrow_timeout=30`) - Prevents 120-second hangs
 4. **Fix SQLAlchemy configuration** (`session_provider.py`) - Resolves connection pool issues
 
