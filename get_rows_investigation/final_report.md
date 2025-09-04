@@ -6,7 +6,7 @@ This report identifies four critical performance issues affecting the `get_rows`
 
 1. ✅ **Missing database indexes** causing full table scans on 73.5M rows (48+ second queries) - **DEPLOYED 2025-09-03**
 2. **Connection pool misconfigurations** resulting in 120-second timeout failures
-3. **N+1 query patterns** in hydration phase causing 31-second delays for just 37 rows
+3. **Inefficient hydration queries** causing 31-second delays (NOT an N+1 pattern - only 3 queries total)
 4. **Insufficient work_mem** forcing 272MB sorts to spill to disk
 
 ### Performance Impact (Production Evidence)
@@ -16,7 +16,7 @@ This report identifies four critical performance issues affecting the `get_rows`
 - **Timeout failures**: 78 operations timing out at exactly 120 seconds (17:59-18:12 EST) - [View in Datadog](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
 - **Slow operations**: fetch_relevant_rows taking up to 25 seconds - [Code Location](https://github.com/hebbia/mono/blob/main/sheets_engine/common/get_rows_utils.py)
 - **Cache ineffective**: 90% cache hit rate but queries still slow (1-14s with cache) - [View Cache Analysis](#cache-effectiveness-analysis)
-- **Hydration bottleneck**: 46 queries with >10s hydration_time, up to 31s
+- **Hydration bottleneck**: 46 queries with >10s hydration_time (up to 31s), but only 3 queries total - likely from missing indexes on joined tables
 - **Disk spills**: 272MB sorts exceed 4MB work_mem - [Query Analysis](#c-sample-query-analysis)
 
 ---
@@ -217,10 +217,10 @@ SELECT pg_reload_conf();
 
 ---
 
-## Problem 4: Hydration Performance (N+1 Queries)
+## Problem 4: Hydration Performance (Inefficient Query Pattern)
 
 ### Problem
-Hydration time (data enrichment phase) taking up to 31 seconds, accounting for majority of query time in some cases.
+Hydration time (data enrichment phase) taking up to 31 seconds, accounting for majority of query time in some cases. However, this is NOT a true N+1 query pattern.
 
 ### Evidence
 
@@ -252,28 +252,57 @@ cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
 - Hydration phase dominates: up to 86% of total execution time
 
 ### Root Cause
-- **N+1 Query Pattern**: `get_documents_for_rows` fetches documents individually
-- **Multiple Sequential Queries**: `generate_matrix_materialized_paths` makes 2+ additional queries
-- **No Caching**: Same data fetched repeatedly for the same sheets
+**Important**: This is NOT a true N+1 query problem. The issue is inefficient query structure:
+- **Fixed 3 Queries Per Request**: `get_documents_for_rows` always makes exactly 3 queries regardless of row count:
+  1. Main query: Fetch documents with joins (batched for all rows)
+  2. Title query: Fetch document titles for path resolution
+  3. Folder query: Fetch folder names for path materialization
+- **Likely Bottleneck**: The 31-second delays are more likely caused by:
+  - Large result sets from the main documents query with multiple joins
+  - Slow query execution due to missing indexes on joined tables
+  - Network latency or connection pool issues (as identified in Problem 1)
+- **Not Scaling with Rows**: Since it's only 3 queries total, the slowness isn't from query count but from query efficiency
 
 ### Solution
+Since this is NOT an N+1 problem (only 3 queries total), the optimization strategy changes:
+
+1. **Add indexes on joined tables** (likely the main issue):
+```sql
+-- Check if these indexes exist on the joined tables:
+CREATE INDEX idx_document_list_document_lookup 
+ON document_list_document(document_id, document_list_id, path);
+
+CREATE INDEX idx_document_list_name 
+ON document_list(id, name);
+```
+
+2. **Optimize the main documents query**:
 ```python
-# File: mono/sheets/data_layer/cells.py:1340-1420
-# Optimize get_documents_for_rows to batch all queries:
-async def get_documents_for_rows_optimized(row_ids: list[UUID]):
-    # Single query with all joins and aggregations
-    # Avoid calling generate_matrix_materialized_paths separately
-    
-# File: mono/sheets/data_layer/cells.py:1217-1320  
-# Add Redis caching to hydrate_rows:
-@cache_key("hydrate_rows:{sheet_id}:{tab_id}:{column_ids_hash}")
-async def hydrate_rows_cached(...):
-    # Check cache first, fall back to DB
+# File: mono/sheets/data_layer/cells.py:1344-1358
+# The current query has multiple JOINs that may lack proper indexes
+```
+
+3. **Parallelize the 3 queries** (minor improvement):
+```python
+# Instead of sequential execution, run in parallel:
+documents, titles, folders = await asyncio.gather(
+    get_documents_query(),
+    get_document_titles(),
+    get_folder_names()
+)
+```
+
+4. **Cache static data** (folder structures rarely change):
+```python
+# File: mono/doc_manager/data_layer/utils.py:202-267
+# Cache folder context with long TTL since it rarely changes
 ```
 
 ### Expected Impact
-- 46 queries would drop from 10-31s hydration to <1s
-- Overall p95 latency reduction of 50%+
+- **Lower than initially thought**: Since it's only 3 queries (not N+1), the impact is primarily from query optimization
+- Hydration time reduction: 31s → 5-10s (70% reduction) from better indexes
+- Further gains possible if connection pool issues (Problem 1) are resolved
+- Not the 95% reduction initially estimated for true N+1 resolution
 
 ---
 
@@ -287,7 +316,7 @@ async def hydrate_rows_cached(...):
 4. **Fix SQLAlchemy configuration** (`session_provider.py`) - Resolves connection pool issues
 
 ### Short-term (Week 1)
-5. **Optimize hydration queries** - Fix N+1 pattern causing 31-second delays
+5. **Optimize hydration queries** - Add indexes on joined tables, parallelize the 3 queries
 6. **Increase work_mem to 256MB** - Eliminate disk spills
 7. **Scale graph worker pools** - Increase from 2/5 to 10/20 connections per worker
 
@@ -304,14 +333,14 @@ async def hydrate_rows_cached(...):
 2. **Missing database indexes** - Full table scans on 73.5M rows
 3. **Connection pool misconfigurations** - Timeout mismatches between SQLAlchemy, AsyncPG, and RDS Proxy
 4. **Graph worker scaling** - October refactoring + November scaling created 270+ connection demand
-5. **N+1 query patterns** - Hydration phase fetching documents individually  
+5. **Inefficient hydration queries** - 3 sequential queries with potentially missing indexes on joined tables (NOT an N+1 pattern)
 6. **Insufficient work_mem** - 4MB limit forcing 272MB sorts to disk
 
 ### Current Production Impact
 - **60-second timeouts**: Most frequent issue from AsyncPG defaults under pool exhaustion
 - **120-second timeouts**: 78 operations timing out daily from RDS Proxy ConnectionBorrowTimeout
 - **336-second timeouts**: Rare compound timeouts from ALB (300s) + retry logic (36s)
-- 46 queries taking 10-31 seconds for hydration alone
+- 46 queries taking 10-31 seconds for hydration (but only 3 DB queries - likely index issues)
 - 563k spans experiencing 60-210 second connection delays
 - 90% cache hit rate but queries still taking 1-14 seconds
 
@@ -319,8 +348,8 @@ async def hydrate_rows_cached(...):
 - **60-second timeouts**: Eliminated via explicit AsyncPG timeout configuration
 - **120-second timeouts**: Reduced to manageable 30s via RDS Proxy fix
 - **336-second timeouts**: Prevented through proper timeout alignment
-- Query latency: 48s → <10ms (99.98% reduction)
-- Hydration time: 10-31s → <1s (95% reduction)
+- Query latency: 48s → <10ms (99.98% reduction) once indexes fully built
+- Hydration time: 10-31s → 5-10s (70% reduction) with index optimization on joined tables
 - Connection acquisition: 60-210s → <100ms
 - Elimination of timeout errors and disk spills
 
