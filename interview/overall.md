@@ -4,9 +4,15 @@
 
 ---
 
+## Important Note
+
+**This is an iterative process**. Expect updates as we refine based on learnings and edge cases.
+
+---
+
 ## Process Philosophy
 
-Evaluate candidates against Hebbia's values (**Cogency, Compassion, Running hard, Readiness**) through standardized building blocks while maintaining high technical standards and cultural fit.
+Evaluate candidates against Hebbia's values (**Cogency, Compassion, Running hard, Readiness**) through standardized building blocks.
 
 ## Scope
 
@@ -22,23 +28,24 @@ Evaluate candidates against Hebbia's values (**Cogency, Compassion, Running hard
 | Building Block | P1 | P2 | P3 | P4 | P5 | P6 |
 |---|---|---|---|---|---|---|
 | **PRE-ONSITE** | | | | | | |
-| **Recruiter Screening** (~30min) | Required (all levels) | | | | | |
-| **Coding** (~60min) | Required (all levels) | | | | | |
-| **Hiring Manager Screening** (~45min) | Required (all levels) | | | | | |
+| **Recruiter Screening** (~30min) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **Coding** (~45min) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **Hiring Manager Screening** (~30min) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | **ONSITE** | | | | | | |
-| **Hiring Manager + Behavior Interview** (~60min) | Required (all levels) | | | | | |
-| **Practical Project Design & Implementation** (~120min) | Required (all levels, simplified for P1) | | | | | |
-| **Coding** (~60min) | Required (P1-P2) | | Not Required (P3-P6) | | | |
-| **System Design** (~60min) | Not Required | Optional | Required (P3-P6) | | | |
-| **Technical Deep Dive** (~90min) | Not Required (P1-P3) | | | Required (P4-P6) | | |
+| **Coding** (~45min) | ✓ | ✓ | - | - | - | - |
+| **System Design** (~60min) | - | Optional | ✓ | ✓ | ✓ | ✓ |
+| **Technical Deep Dive** (~60min) | - | - | - | ✓ | ✓ | ✓ |
+| **Practical Project Design & Implementation** (~120min) | ✓ (simplified) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **Hiring Manager + Behavior Interview** (~60min, VP Eng) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | **POST-ONSITE** | | | | | | |
-| **Executive Interviews** (~60min) | Not Required (P1-P3) | | | Required (P4-P6: CEO/CTO/VP Eng) | | |
+| **Executive Interview 1** (~30min, CEO) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **Executive Interview 2** (~30min, CTO) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | | | | | | | |
-| **Pre-onsite Time** | ~2.25 hours | ~2.25 hours | ~2.25 hours | ~2.25 hours | ~2.25 hours | ~2.25 hours |
-| **Onsite Time** | ~3.5 hours | ~3.5-4.5 hours | ~3.5 hours | ~4 hours | ~4 hours | ~4 hours |
-| **Post-onsite Time** | 0 | 0 | 0 | ~1 hour | ~1 hour | ~1 hour |
-| **Total Time** | ~5.75 hours | ~5.75-6.75 hours | ~5.75 hours | ~7.25 hours | ~7.25 hours | ~7.25 hours |
-| **Total Sessions** | 5 | 5-6 | 5 | 6 | 6 | 6 |
+| **Pre-onsite Time** | ~1.75 hours | ~1.75 hours | ~1.75 hours | ~1.75 hours | ~1.75 hours | ~1.75 hours |
+| **Onsite Time** | ~3.75 hours | ~3.75-4.75 hours | ~4 hours | ~5 hours | ~5 hours | ~5 hours |
+| **Post-onsite Time** | ~1 hour | ~1 hour | ~1 hour | ~1 hour | ~1 hour | ~1 hour |
+| **Total Time** | ~6.5 hours | ~6.5-7.5 hours | ~6.75 hours | ~7.75 hours | ~7.75 hours | ~7.75 hours |
+| **Total Sessions** | 8 | 8-9 | 8 | 9 | 9 | 9 |
 | **Key Focus** | Fundamentals, culture fit | Independent execution, ownership | Technical leadership, mentorship | Organizational influence, architecture | Company-wide impact, vision | Industry leadership, transformation |
 
 **Interview building blocks**:
@@ -50,32 +57,77 @@ Evaluate candidates against Hebbia's values (**Cogency, Compassion, Running hard
 - [Behavior Interview](./behavior_interview.md)
 - [Technical Deep Dive](./technical_deep_dive.md)
 
-**Note**: This is a suggested baseline process. Teams can make adjustments based on specific needs:
-- **Pre-onsite flexibility for remote hires**: Move additional onsite rounds to pre-onsite (e.g., system design, behavior) to ensure stronger mutual fit before travel burden
-- **Role-specific templates**: Coding, system design, and practical project interviews have specialized variants for Backend, Frontend, Data Engineering, Research Engineering, and DevOps roles
+---
+
+## Process Variations
+
+Accommodations for specific situations:
+
+### A. Non-Local Candidates
+- **Pre-onsite adjustments**: Move onsite rounds to pre-onsite before travel
+- **Virtual onsite**: Fully virtual option available
+- **Split onsite**: Can split across multiple days
+
+### B. Candidates with Pending Offers
+- **Accelerated process**: Combine coding and HM screening into one session
+- **Compressed timeline**: Complete all rounds within decision timeline
+
+### C. Executive Interview Evolution
+**Current**: VP Eng conducts onsite HM interview; CEO & CTO conduct post-onsite interviews
+
+**Transition**: Gradually unlock HMs for onsite behavior round; VP Eng & CTO for post-onsite
+
+**Target**: HMs conduct onsite; single VP Eng post-onsite interview
+
+### D. Role-Specific Adjustments
+- Specialized variants for Backend, Frontend, Data, Research, and DevOps roles
 
 ---
 
 ### Rating Scale
 
-Each building block uses this rating scale:
+Each building block uses a numeric rating scale (1-4):
 
-- **Strong Yes**: Exceptional candidate, clear hire
-- **Yes**: Good candidate, likely hire with positive team consensus
-- **No**: Concerns about role fit or level appropriateness
-- **Strong No**: Clear concerns, not a good fit
+- **4 - Strong Yes**: Exceptional candidate, clear hire
+- **3 - Yes**: Good candidate, likely hire with positive team consensus  
+- **2 - No**: Concerns about role fit or level appropriateness
+- **1 - Strong No**: Clear concerns, not a good fit
+
+---
+
+## Rollout Process
+
+Phased implementation:
+
+### Phase 1: Pre-onsite and Post-onsite
+- Standardize pre-onsite rounds
+- Standardize CEO/CTO post-onsite interviews
+- Add VP Eng to onsite as additional round
+- Keep existing onsite during transition
+
+### Phase 2: Onsite Evolution
+- Gradually replace existing onsite rounds
+- Pilot with select teams first
+- Gather feedback and iterate
+- Full rollout once validated
+
+### Phase 3: Continuous Improvement
+- Track metrics: time-to-hire, candidate experience, quality
+- Iterate based on data
+- Calibrate interviewer standards
 
 ---
 
 ## Open Questions
 
-1. **Too much coding for P1/P2 in the onsite?**
-   - Current: Both pre-onsite coding (~60min) and onsite coding (~60min) for P1-P2
-   - Potential solution: Replace onsite coding with system design for better signal?
+1. **Is onsite duration appropriate?**
+   - Current: 3.75-5 hours by level
+   - Proposed: 1-2 rounds → lunch → 2 rounds
+   - Balance evaluation depth vs. candidate fatigue
 
-2. **Should P1-P3 have executive interviews?**
-   - Currently excluded for junior/mid-level roles
-   - Consider adding for culture fit and mutual assessment?
+2. **Technical Deep Dive necessity for P4+?**
+   - Already have: coding, system design, practical project
+   - Question: Does it add unique signal?
 
 ---
 
@@ -83,4 +135,5 @@ Each building block uses this rating scale:
 
 | Version | Date | Changes | Author |
 |---------|------|---------|---------|
-| 1.0 | 2025-01-27 | Initial creation of interview process overview | Sisu Xi |
+| 1.0 | 2025-09-02 | Initial creation of interview process overview | Sisu Xi |
+| 1.1 | 2025-09-04 | Added iterative process note and edge case variations | Sisu Xi |
