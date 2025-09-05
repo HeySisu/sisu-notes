@@ -134,6 +134,8 @@ class HebbiaDatabaseExplorer:
     def execute_query(self, query: str) -> List[Dict[str, Any]]:
         """Execute query (readonly user prevents any write operations)"""
         try:
+            # Set statement timeout to 1 minute (60000 milliseconds)
+            self.cursor.execute("SET statement_timeout = 60000")
             self.cursor.execute(query)
             columns = [desc[0] for desc in self.cursor.description] if self.cursor.description else []
             rows = self.cursor.fetchall() if self.cursor.description else []
