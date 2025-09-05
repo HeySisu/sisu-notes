@@ -4,20 +4,20 @@
 
 ---
 
-## Important Note
+## Status Note
 
-**This is an iterative process**. Expect updates as we refine based on learnings and edge cases.
+This process will evolve based on feedback and results.
 
 ---
 
 ## Process Philosophy
 
-Evaluate candidates against Hebbia's values (**Cogency, Compassion, Running hard, Readiness**) through standardized building blocks.
+Evaluate candidates against Hebbia's values (Cogency, Compassion, Running hard, Readiness) through standardized building blocks.
 
 ## Scope
 
-**IC Engineering roles only**: Backend, Frontend, Data, Research, DevOps/Infrastructure.
-**Excludes**: TLMs and EMs (separate tracks).
+IC Engineering roles: Backend, Frontend, Data, Research, DevOps/Infrastructure.
+Excludes: TLMs and EMs (separate tracks).
 
 ---
 
@@ -48,7 +48,7 @@ Evaluate candidates against Hebbia's values (**Cogency, Compassion, Running hard
 | **Total Sessions** | 8 | 8-9 | 8 | 9 | 9 | 9 |
 | **Key Focus** | Fundamentals, culture fit | Independent execution, ownership | Technical leadership, mentorship | Organizational influence, architecture | Company-wide impact, vision | Industry leadership, transformation |
 
-**Interview building blocks**:
+### Interview Building Blocks
 - [Recruiter Screening](./recruiter_screening.md)
 - [Coding](./coding.md)
 - [System Design](./System_Design_Interview_Guidelines.md) ✅
@@ -61,55 +61,53 @@ Evaluate candidates against Hebbia's values (**Cogency, Compassion, Running hard
 
 ## Process Variations
 
-Accommodations for specific situations:
 
 ### A. Non-Local Candidates
-- **Pre-onsite adjustments**: Move onsite rounds to pre-onsite before travel
-- **Virtual onsite**: Fully virtual option available
-- **Split onsite**: Can split across multiple days
+- Move onsite rounds to pre-onsite before travel
+- Virtual onsite option available
+- Can split across multiple days
 
 ### B. Candidates with Pending Offers
-- **Accelerated process**: Combine coding and HM screening into one session
-- **Compressed timeline**: Complete all rounds within decision timeline
+- Combine coding and HM screening into one session
+- Complete all rounds within decision timeline
 
 ### C. Executive Interview Evolution
-**Current**: VP Eng conducts onsite HM interview; CEO & CTO conduct post-onsite interviews
+Current: VP Eng conducts onsite HM interview; CEO & CTO conduct post-onsite interviews
 
-**Transition**: Gradually unlock HMs for onsite behavior round; VP Eng & CTO for post-onsite
+Transition: Enable HMs for onsite behavior round; VP Eng & CTO for post-onsite
 
-**Target**: HMs conduct onsite; single VP Eng post-onsite interview
+Target: HMs conduct onsite; single VP Eng post-onsite interview
 
 ### D. Role-Specific Adjustments
-- Specialized variants for Backend, Frontend, Data, Research, and DevOps roles
+Specialized variants for Backend, Frontend, Data, Research, and DevOps roles
 
 ---
 
 ### Rating Scale
 
-Each building block uses a numeric rating scale (1-4):
+Each building block uses a 1-4 scale:
 
 - **4 - Strong Yes**: Exceptional candidate, clear hire
-- **3 - Yes**: Good candidate, likely hire with positive team consensus  
-- **2 - No**: Concerns about role fit or level appropriateness
-- **1 - Strong No**: Clear concerns, not a good fit
+- **3 - Yes**: Good candidate, hire with positive consensus
+- **2 - No**: Concerns about role fit or level
+- **1 - Strong No**: Not a good fit
 
 ---
 
 ## Rollout Process
 
-Phased implementation:
 
 ### Phase 1: Pre-onsite and Post-onsite
 - Standardize pre-onsite rounds
 - Standardize CEO/CTO post-onsite interviews
-- Add VP Eng to onsite as additional round
+- Add VP Eng to onsite
 - Keep existing onsite during transition
 
 ### Phase 2: Onsite Evolution
-- Gradually replace existing onsite rounds
-- Pilot with select teams first
+- Replace existing onsite rounds
+- Pilot with select teams
 - Gather feedback and iterate
-- Full rollout once validated
+- Full rollout after validation
 
 ### Phase 3: Continuous Improvement
 - Track metrics: time-to-hire, candidate experience, quality
@@ -120,14 +118,14 @@ Phased implementation:
 
 ## Open Questions
 
-1. **Is onsite duration appropriate?**
+1. **Onsite duration**
    - Current: 3.75-5 hours by level
    - Proposed: 1-2 rounds → lunch → 2 rounds
-   - Balance evaluation depth vs. candidate fatigue
+   - Consider evaluation depth vs. candidate fatigue
 
-2. **Technical Deep Dive necessity for P4+?**
+2. **Technical Deep Dive for P4+**
    - Already have: coding, system design, practical project
-   - Question: Does it add unique signal?
+   - Does it add unique signal?
 
 ---
 
