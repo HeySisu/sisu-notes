@@ -4,20 +4,50 @@
 
 ---
 
-## Status Note
+## Feedback & Review Log
 
-This process will evolve based on feedback and results.
+| Name | Feedback Status | Date | Comments |
+|------|-----------------|------|----------|
+| Rob Day | Not started | Date | |
+| Scott Bianco | Not started | Date | |
+| Ben Devore | Not started | Date | |
+| Beshoi Genidy | Not started | Date | |
 
 ---
 
-## Process Philosophy
+## Next Steps & Timeline
 
-Evaluate candidates against Hebbia's values (Cogency, Compassion, Running hard, Readiness) through standardized building blocks.
+### Key Milestones
+
+| Date | Milestone | Details |
+|------|-----------|---------|
+| **2025-09-09** | Alignment on Overall Plan | Key stakeholder agreement on interview blocks and level combinations |
+| **2025-09-12** | Block Ownership Assignment | Sisu to organize with volunteers to assign individual blocks |
+| **2025-09-22** | Phase 1: Pre-onsite Pilot | • Pilot: Recruiter Screening, Coding, HM Screening<br>• Keep existing onsite during transition |
+| **2025-09-30** | Draft Blocks Ready | All blocks with question banks (Priority: Coding, HM Screening, System Design) |
+| **2025-10-06** | Phase 2: Onsite Pilot | • Pilot: System Design, Technical Deep Dive, Practical Project, Behavior Interview<br>• Roll out gradually with select teams<br>• Gather feedback before full rollout |
+| **Ongoing** | Phase 3: Continuous Improvement | • Track metrics: time-to-hire, candidate experience, quality<br>• Iterate based on data<br>• Calibrate interviewer standards |
+
+---
+
+## Status
+
+Process evolves with feedback and results.
+
+---
+
+## Philosophy
+
+Evaluate candidates against Hebbia's values through standardized building blocks:
+- Cogency
+- Compassion
+- Running hard
+- Readiness
 
 ## Scope
 
-IC Engineering roles: Backend, Frontend, Data, Research, DevOps/Infrastructure.
-Excludes: TLMs and EMs (separate tracks).
+**Includes**: IC Engineering roles (Backend, Frontend, Data, Research, DevOps/Infrastructure)
+**Excludes**: TLMs and EMs (separate tracks)
 
 ---
 
@@ -64,68 +94,43 @@ Excludes: TLMs and EMs (separate tracks).
 
 ### A. Non-Local Candidates
 - Move onsite rounds to pre-onsite before travel
-- Virtual onsite option available
-- Can split across multiple days
+- Offer virtual onsite option
+- Split across multiple days if needed
 
 ### B. Candidates with Pending Offers
-- Combine coding and HM screening into one session
-- Complete all rounds within decision timeline
+- Combine coding and HM screening
+- Complete rounds within decision timeline
 
 ### C. Executive Interview Evolution
-Current: VP Eng conducts onsite HM interview; CEO & CTO conduct post-onsite interviews
-
-Transition: Enable HMs for onsite behavior round; VP Eng & CTO for post-onsite
-
-Target: HMs conduct onsite; single VP Eng post-onsite interview
+**Current**: VP Eng conducts onsite HM interview; CEO & CTO conduct post-onsite
+**Transition**: HMs conduct onsite behavior round; VP Eng & CTO for post-onsite
+**Target**: HMs conduct onsite; single VP Eng post-onsite interview
 
 ### D. Role-Specific Adjustments
-Specialized variants for Backend, Frontend, Data, Research, and DevOps roles
+Customize for Backend, Frontend, Data, Research, and DevOps roles
 
 ---
 
-### Rating Scale
+### Rating Scale (1-4)
 
-Each building block uses a 1-4 scale:
-
-- **4 - Strong Yes**: Exceptional candidate, clear hire
-- **3 - Yes**: Good candidate, hire with positive consensus
-- **2 - No**: Concerns about role fit or level
-- **1 - Strong No**: Not a good fit
-
----
-
-## Rollout Process
-
-
-### Phase 1: Pre-onsite and Post-onsite
-- Standardize pre-onsite rounds
-- Standardize CEO/CTO post-onsite interviews
-- Add VP Eng to onsite
-- Keep existing onsite during transition
-
-### Phase 2: Onsite Evolution
-- Replace existing onsite rounds
-- Pilot with select teams
-- Gather feedback and iterate
-- Full rollout after validation
-
-### Phase 3: Continuous Improvement
-- Track metrics: time-to-hire, candidate experience, quality
-- Iterate based on data
-- Calibrate interviewer standards
+- **4 - Strong Yes**: Clear hire
+- **3 - Yes**: Hire with consensus
+- **2 - No**: Role fit concerns
+- **1 - Strong No**: Not a fit
 
 ---
 
 ## Open Questions
 
-1. **Onsite duration**
-   - Current: 3.75-5 hours by level
-   - Proposed: 1-2 rounds → lunch → 2 rounds
-   - Consider evaluation depth vs. candidate fatigue
+1. **Onsite duration**: Balance evaluation depth with candidate fatigue (3.75-5 hours)
 
-2. **Technical Deep Dive for P4+**
-   - Already have: coding, system design, practical project
-   - Does it add unique signal?
+2. **Technical Deep Dive for P4+**: Does it add unique signal beyond coding, system design, and practical project?
+
+3. **System Design during Phase 1**: What approach for system design interviews while the new block is being developed?
+
+4. **Timeline feasibility**: Is the timeline too aggressive for block development and pilot phases?
+
+5. **GitHub migration**: Plan to move all documentation and question banks to GitHub repository
 
 ---
 
