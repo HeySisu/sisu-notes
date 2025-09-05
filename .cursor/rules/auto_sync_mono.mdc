@@ -5,7 +5,7 @@ alwaysApply: true
 # Auto-sync Mono Repository
 
 ## Rule
-The `mono/` folder is a read-only reference copy of the Hebbia mono repository. Always pull latest changes before code analysis.
+The `~/Hebbia/mono/` folder is a read-only reference copy of the Hebbia mono repository. Always pull latest changes before code analysis.
 
 ## Quick Sync
 ```bash
