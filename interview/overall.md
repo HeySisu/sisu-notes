@@ -22,21 +22,23 @@ Evaluate candidates against Hebbia's values (**Cogency, Compassion, Running hard
 | Building Block | P1 | P2 | P3 | P4 | P5 | P6 |
 |---|---|---|---|---|---|---|
 | **PRE-ONSITE** | | | | | | |
-| **Recruiter Screening** | Required (all levels) | | | | | |
-| **Coding** | Required (all levels) | | | | | |
-| **Hiring Manager Screening** | Required (all levels) | | | | | |
+| **Recruiter Screening** (~30min) | Required (all levels) | | | | | |
+| **Coding** (~60min) | Required (all levels) | | | | | |
+| **Hiring Manager Screening** (~45min) | Required (all levels) | | | | | |
 | **ONSITE** | | | | | | |
-| **Hiring Manager + Behavior Interview** | Required (all levels) | | | | | |
-| **Practical Project Design & Implementation** | Required (all levels, simplified for P1) | | | | | |
-| **Coding** | Required (P1-P2) | | Not Required (P3-P6) | | | |
-| **System Design** | Not Required | Optional | Required (P3-P6) | | | |
-| **Behavior Interview** | Not Required (P1-P2) | | Required (P3-P6) | | | |
-| **Technical Deep Dive** | Not Required (P1-P3) | | | Required (P4-P6) | | |
+| **Hiring Manager + Behavior Interview** (~60min) | Required (all levels) | | | | | |
+| **Practical Project Design & Implementation** (~120min) | Required (all levels, simplified for P1) | | | | | |
+| **Coding** (~60min) | Required (P1-P2) | | Not Required (P3-P6) | | | |
+| **System Design** (~60min) | Not Required | Optional | Required (P3-P6) | | | |
+| **Technical Deep Dive** (~90min) | Not Required (P1-P3) | | | Required (P4-P6) | | |
 | **POST-ONSITE** | | | | | | |
-| **Executive Interviews** | Not Required (P1-P3) | | | Required (P4-P6: CEO/CTO/VP Eng) | | |
+| **Executive Interviews** (~60min) | Not Required (P1-P3) | | | Required (P4-P6: CEO/CTO/VP Eng) | | |
 | | | | | | | |
-| **Total Time** | ~5.75 hours | ~5.75-6.75 hours | ~6.75 hours | ~8.25 hours | ~8.25 hours | ~8.25 hours |
-| **Total Sessions** | 5 | 5-6 | 6 | 7 | 7 | 7 |
+| **Pre-onsite Time** | ~2.25 hours | ~2.25 hours | ~2.25 hours | ~2.25 hours | ~2.25 hours | ~2.25 hours |
+| **Onsite Time** | ~3.5 hours | ~3.5-4.5 hours | ~3.5 hours | ~4 hours | ~4 hours | ~4 hours |
+| **Post-onsite Time** | 0 | 0 | 0 | ~1 hour | ~1 hour | ~1 hour |
+| **Total Time** | ~5.75 hours | ~5.75-6.75 hours | ~5.75 hours | ~7.25 hours | ~7.25 hours | ~7.25 hours |
+| **Total Sessions** | 5 | 5-6 | 5 | 6 | 6 | 6 |
 | **Key Focus** | Fundamentals, culture fit | Independent execution, ownership | Technical leadership, mentorship | Organizational influence, architecture | Company-wide impact, vision | Industry leadership, transformation |
 
 **Interview building blocks**:
@@ -49,7 +51,7 @@ Evaluate candidates against Hebbia's values (**Cogency, Compassion, Running hard
 - [Technical Deep Dive](./technical_deep_dive.md)
 
 **Note**: This is a suggested baseline process. Teams can make adjustments based on specific needs:
-- **Pre-onsite flexibility**: Move additional onsite rounds to pre-onsite (e.g., system design, behavior) to ensure stronger mutual fit before travel costs
+- **Pre-onsite flexibility for remote hires**: Move additional onsite rounds to pre-onsite (e.g., system design, behavior) to ensure stronger mutual fit before travel burden
 - **Role-specific templates**: Coding, system design, and practical project interviews have specialized variants for Backend, Frontend, Data Engineering, Research Engineering, and DevOps roles
 
 ---
@@ -62,6 +64,18 @@ Each building block uses this rating scale:
 - **Yes**: Good candidate, likely hire with positive team consensus
 - **No**: Concerns about role fit or level appropriateness
 - **Strong No**: Clear concerns, not a good fit
+
+---
+
+## Open Questions
+
+1. **Too much coding for P1/P2 in the onsite?**
+   - Current: Both pre-onsite coding (~60min) and onsite coding (~60min) for P1-P2
+   - Potential solution: Replace onsite coding with system design for better signal?
+
+2. **Should P1-P3 have executive interviews?**
+   - Currently excluded for junior/mid-level roles
+   - Consider adding for culture fit and mutual assessment?
 
 ---
 

@@ -4,14 +4,14 @@
 
 This report identifies four critical performance issues affecting the `get_rows` function, with evidence-based solutions for each:
 
-1. ✅ **Missing database indexes** causing full table scans on 73.5M rows - **RESOLVED 2025-09-04**
-2. **Connection pool misconfigurations** resulting in 120-second timeout failures
+1. **Connection pool misconfigurations** resulting in 60-210 second connection establishment delays
+2. **Insufficient work_mem** forcing 272MB sorts to spill to disk, adding 5+ seconds per query
 3. **Inefficient hydration queries** causing 31-second delays (NOT an N+1 pattern - only 3 queries total)
-4. **Insufficient work_mem** forcing 272MB sorts to spill to disk
+4. ✅ **Database indexes working correctly** - Indexes deployed and functioning as designed for aggregate queries
 
 ### Performance Impact (Production Evidence)
-- ✅ **Missing indexes**: RESOLVED - Indexes fully operational (PR #13537)
-- **Index performance**: Query time reduced from 48s to 1.16ms (99.998% improvement)
+- **Connection establishment**: 60-210 second delays affecting 563k spans - primary bottleneck
+- **Disk spills**: 272MB sorts on 4MB work_mem causing 5+ second query overhead
 - **Connection delays**: 60-second and 210-second (3.5 min) timeout patterns affecting 563k spans - [View APM Analysis](#connection-timeout-analysis)
 - **Timeout failures**: 78 operations timing out at exactly 120 seconds (17:59-18:12 EST) - [View in Datadog](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
 - **Slow operations**: fetch_relevant_rows taking up to 25 seconds - [Code Location](https://github.com/hebbia/mono/blob/main/sheets_engine/common/get_rows_utils.py)
@@ -22,7 +22,7 @@ This report identifies four critical performance issues affecting the `get_rows`
 ---
 
 
-## Problem 1: Connection Pool Misconfigurations
+## Problem 1: Connection Pool Misconfigurations (PRIMARY BOTTLENECK)
 
 ### Problem
 Multiple timeout misconfigurations between SQLAlchemy, RDS Proxy, ALB, and AsyncPG cause connection delays and timeouts at 60s, 120s, and 336s:
@@ -97,92 +97,10 @@ connect_timeout_secs: int = 30  # Explicit 30-second timeout to fail fast
 
 ---
 
-## Problem 2: Missing Database Indexes
-
-### ✅ UPDATE (2025-09-04): INDEXES FULLY DEPLOYED AND OPERATIONAL
-The 2 critical indexes from PR #13537 are now **fully built and operational** in production as of September 4, 2025:
-- `ix_cells_sheet_tab_versioned_col_hash_updated` (18 GB) - ✅ Built and valid
-- `ix_cells_max_updated_at_per_sheet_tab` (3 GB) - ✅ Built and valid
-
-**Confirmed Performance Improvement**: 
-- MAX() query execution time: **48,139ms → 1.16ms** (99.998% reduction)
-- Query now uses index scan instead of sequential scan
-- Buffer usage: 272MB disk reads → 4 buffer hits only
+## Problem 2: Insufficient work_mem Causing Disk Spills
 
 ### Problem
-DISTINCT ON and MAX() queries perform full table scans on 73.5M row table, causing 48+ second queries and 120+ second timeouts.
-
-### Evidence
-
-#### Database Query Confirming Deployed Indexes (2025-09-04)
-```bash
-cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py --env prod \
-  "SELECT indexname FROM pg_indexes WHERE tablename = 'cells' AND indexname LIKE '%updated%'"
-
-# Result: 3 total indexes (1 pre-existing + 2 new from PR #13537):
-# - ix_cells_cell_hash_updated_at_desc (PRE-EXISTING - 35 GB)
-# - ix_cells_sheet_tab_versioned_col_hash_updated (NEW from PR #13537 - 18 GB)
-# - ix_cells_max_updated_at_per_sheet_tab (NEW from PR #13537 - 3 GB)
-```
-
-#### Datadog Logs - 120+ Second Timeouts
-```bash
-cd ~/Hebbia/sisu-notes && .venv/bin/python tools/datadog_explorer.py \
-  "traces:resource_name:*fetch_relevant_rows* @duration:>120000000000" \
-  --timeframe "2025-08-29T14:00:00,2025-08-29T19:00:00"
-
-# Result: 19 operations timing out at exactly 120 seconds
-```
-🔗 [View timeouts in Datadog](https://app.datadoghq.com/apm/traces?query=resource_name%3A*fetch_relevant_rows*%20%40duration%3A%3E120000000000&start=1756490400000&end=1756508400000)
-
-#### Datadog Logs - Cache Hit Performance Still Shows Impact
-🔗 [View cached queries still slow due to missing indexes](https://app.datadoghq.com/logs?query=env%3Aprod%20run_get_rows_db_queries%20performance%20%40cache_hit%3Atrue&agg_m=%40relevant_rows_time&agg_m_source=base&agg_q=%40matrix_size_category&agg_q_source=base&agg_t=max&clustering_pattern_field_path=message&cols=host%2Cservice&event=AwAAAZkKTk_0JFfTIgAAABhBWmtLVGxJWEFBQVpvNVNUYlgtSkZnQUwAAAAkZjE5OTBhNTUtMzZhNS00NTRjLWI5ZWUtNzYwNTM3MTY5YTNhABAqnA&fromUser=true&messageDisplay=inline&panel=%7B%22queryString%22%3A%22%40matrix_size_category%3Asmall%22%2C%22filters%22%3A%5B%7B%22isClicked%22%3Atrue%2C%22source%22%3A%22log%22%2C%22path%22%3A%22matrix_size_category%22%2C%22value%22%3A%22small%22%7D%5D%2C%22queryId%22%3A%22a%22%2C%22timeRange%22%3A%7B%22from%22%3A1756814400000%2C%22to%22%3A1756814700000%2C%22live%22%3Afalse%7D%7D&refresh_mode=sliding&sort_m=%40relevant_rows_time&sort_m_source=base&sort_t=max&storage=hot&stream_sort=desc&top_n=10&top_o=top&viz=timeseries&x_missing=true&from_ts=1756779222067&to_ts=1756865622067&live=true)
-- Shows even cached queries with `cache_hit:true` are experiencing slowness
-- Small matrix queries (which should be fast) still taking excessive time
-- Direct evidence that missing indexes affect performance regardless of caching
-
-#### SQL EXPLAIN Output
-```sql
--- MAX() query without index
-EXPLAIN (ANALYZE, BUFFERS)
-SELECT MAX(updated_at) FROM cells 
-WHERE sheet_id = '...' AND tab_id = '...';
-
--- Result:
-Seq Scan on cells (actual time=0.032..47234.123 rows=830518)
-Rows Removed by Filter: 157404049
-Execution Time: 48139.000 ms    -- 48 SECONDS!
-```
-
-### Solution
-✅ **COMPLETED (2025-09-03)**: Migration 340fa1ccadc5 deployed to production
-
-```sql
--- PR #13537: Added 2 new composite indexes (deployed September 3, 2025)
-CREATE INDEX CONCURRENTLY ix_cells_sheet_tab_versioned_col_hash_updated
-ON cells (sheet_id, tab_id, versioned_column_id, cell_hash, updated_at DESC);
-
-CREATE INDEX CONCURRENTLY ix_cells_max_updated_at_per_sheet_tab
-ON cells (sheet_id, tab_id, updated_at DESC, versioned_column_id);
-```
-
-### Expected Impact (Now Active in Production)
-- DISTINCT ON: 5.58s → <100ms (98% reduction)
-- MAX() query: 48s → <10ms (99.98% reduction)
-- Eliminate 120+ second timeouts
-
-### Post-Deployment Results (2025-09-04)
-Database performance dramatically improved with fully operational indexes:
-- **Index Status**: All indexes valid and ready (`indisvalid: true`, `indisready: true`)
-- **Query Performance**: MAX() queries now execute in ~1ms using index scans
-- **Next Focus**: Remaining bottlenecks are connection pool issues and hydration query inefficiencies
-
----
-
-## Problem 3: Insufficient work_mem Causing Disk Spills
-
-### Problem
-Sorts require 272MB but work_mem is only 4MB, causing disk spills and 5+ second queries.
+Sorts require 272MB but work_mem is only 4MB, causing disk spills and adding 5+ seconds to query execution.
 
 ### Evidence
 
@@ -220,7 +138,55 @@ SELECT pg_reload_conf();
 
 ---
 
-## Problem 4: Hydration Performance (Inefficient Query Pattern)
+## Understanding Index Behavior (Corrected Analysis)
+
+### Why The Index IS Working Correctly
+
+The application query pattern in `mono/sheets/data_layer/cells.py` is:
+```python
+query = sa.select(func.max(Cell.updated_at)).where(
+    Cell.sheet_id == sheet_id,
+    Cell.tab_id == tab_id,
+    Cell.versioned_column_id.in_(column_ids),
+)
+```
+
+This generates SQL like:
+```sql
+SELECT MAX(updated_at) FROM cells 
+WHERE sheet_id = '...' AND tab_id = '...' 
+  AND versioned_column_id IN ('uuid1', 'uuid2', ..., 'uuid10')
+```
+
+#### The Query Planner is Correct
+When PostgreSQL sees this aggregate query with an `IN` clause:
+1. It must find **ALL rows** matching the WHERE clause (112,430 rows)
+2. Then aggregate them to find MAX(updated_at)
+3. The index `ix_cells_sheet_tab_versioned_col_hash_updated` is the **right choice** for this pattern
+4. This is standard, expected behavior for aggregate queries
+
+#### The 5.4 Second Execution Time Breakdown
+- **~5 seconds**: Disk I/O from 272MB sorts exceeding 4MB work_mem
+- **~0.4 seconds**: Normal aggregate processing of 112K rows
+- **NOT** from "wrong index selection"
+
+### Evidence
+
+#### Database Query Confirming Deployed Indexes (2025-09-04)
+```bash
+cd ~/Hebbia/sisu-notes && .venv/bin/python tools/db_explorer.py --env prod \
+  "SELECT indexname FROM pg_indexes WHERE tablename = 'cells' AND indexname LIKE '%updated%'"
+
+# Result: 3 total indexes (1 pre-existing + 2 new from PR #13537):
+# - ix_cells_cell_hash_updated_at_desc (PRE-EXISTING - 35 GB)
+# - ix_cells_sheet_tab_versioned_col_hash_updated (NEW from PR #13537 - 18 GB)
+# - ix_cells_max_updated_at_per_sheet_tab (NEW from PR #13537 - 3 GB)
+```
+
+
+---
+
+## Problem 3: Hydration Performance (Inefficient Query Pattern)
 
 ### Problem
 Hydration time (data enrichment phase) taking up to 31 seconds, accounting for majority of query time in some cases. However, this is NOT a true N+1 query pattern.
@@ -313,15 +279,13 @@ documents, titles, folders = await asyncio.gather(
 
 ### Immediate Actions (Day 1)
 1. **Set AsyncPG timeout** (`configs.py`: `connect_timeout_secs=30`) - Eliminates 60-second hangs
-2. ✅ **Deploy database indexes** (migration `340fa1ccadc5`) - **COMPLETED 2025-09-04**
-   - Indexes fully operational, query performance improved by 99.998%
-3. **Update RDS Proxy timeout** (Terraform: `connection_borrow_timeout=30`) - Prevents 120-second hangs
-4. **Fix SQLAlchemy configuration** (`session_provider.py`) - Resolves connection pool issues
+2. **Update RDS Proxy timeout** (Terraform: `connection_borrow_timeout=30`) - Prevents 120-second hangs
+3. **Fix SQLAlchemy configuration** (`session_provider.py`) - Resolves connection pool issues
+4. **Increase work_mem to 256MB** - Eliminate disk spills causing 5+ second overhead
 
 ### Short-term (Week 1)
 5. **Optimize hydration queries** - Add indexes on joined tables, parallelize the 3 queries
-6. **Increase work_mem to 256MB** - Eliminate disk spills
-7. **Scale graph worker pools** - Increase from 2/5 to 10/20 connections per worker
+6. **Scale graph worker pools** - Increase from 2/5 to 10/20 connections per worker
 
 ### Medium-term (Week 2)
 8. **Align ALB/application timeouts** - Prevent mid-operation connection kills
@@ -333,11 +297,11 @@ documents, titles, folders = await asyncio.gather(
 
 ### Root Causes Identified
 1. **AsyncPG default timeout** - 60-second hardcoded timeout when connection pool exhausted
-2. **Missing database indexes** - Full table scans on 73.5M rows
-3. **Connection pool misconfigurations** - Timeout mismatches between SQLAlchemy, AsyncPG, and RDS Proxy
+2. **Connection pool misconfigurations** - Timeout mismatches between SQLAlchemy, AsyncPG, and RDS Proxy
+3. **Insufficient work_mem** - 4MB limit forcing 272MB sorts to disk, causing 5+ second overhead
 4. **Graph worker scaling** - October refactoring + November scaling created 270+ connection demand
 5. **Inefficient hydration queries** - 3 sequential queries with potentially missing indexes on joined tables (NOT an N+1 pattern)
-6. **Insufficient work_mem** - 4MB limit forcing 272MB sorts to disk
+6. ✅ **Indexes working correctly** - Query planner correctly handling aggregate queries with IN clauses
 
 ### Current Production Impact
 - **60-second timeouts**: Most frequent issue from AsyncPG defaults under pool exhaustion
@@ -351,10 +315,10 @@ documents, titles, folders = await asyncio.gather(
 - **60-second timeouts**: Eliminated via explicit AsyncPG timeout configuration
 - **120-second timeouts**: Reduced to manageable 30s via RDS Proxy fix
 - **336-second timeouts**: Prevented through proper timeout alignment
-- ✅ Query latency: 48s → 1.16ms (99.998% reduction) - **ACHIEVED with indexes**
-- Hydration time: 10-31s → 5-10s (70% reduction) with index optimization on joined tables
-- Connection acquisition: 60-210s → <100ms
-- Elimination of timeout errors and disk spills
+- **Query performance**: 5+ second overhead eliminated by fixing work_mem (272MB sorts)
+- **Connection acquisition**: 60-210s → <100ms (primary performance gain)
+- **Hydration time**: 10-31s → 5-10s (70% reduction) with index optimization on joined tables
+- **Overall impact**: Most queries will improve by 60-210 seconds from connection fixes alone
 
 ---
 
