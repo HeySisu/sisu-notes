@@ -23,3 +23,6 @@ Thumbs.db
 tools/config.py
 
 mono
+
+# Serena folder
+.serena/
